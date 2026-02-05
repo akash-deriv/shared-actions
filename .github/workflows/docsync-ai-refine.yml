@@ -19,10 +19,10 @@ jobs:
     name: 📝 Refine Documentation
     runs-on: ubuntu-latest
 
-    # Only run on PR comments that start with docsync:
+    # Only run on PR comments that start with @docsync
     if: |
       github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, 'docsync:')
+      startsWith(github.event.comment.body, '@docsync')
 
     permissions:
       contents: write
@@ -40,30 +40,82 @@ jobs:
           echo "Comment Author: @${{ github.event.comment.user.login }}" >> $GITHUB_STEP_SUMMARY
           echo "Repository: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
 
-      - name: 🤖 Run DocSync AI Refinement Action
+      - name: 🏷️ Verify DocSync PR
+        id: verify-pr
+        env:
+          GH_TOKEN: ${{ secrets.DOCSYNC_GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          echo "## 🏷️ PR Verification" >> $GITHUB_STEP_SUMMARY
+
+          # Get PR details
+          PR_DATA=$(gh api "/repos/${{ github.repository }}/pulls/$PR_NUMBER")
+          PR_TITLE=$(echo "$PR_DATA" | jq -r '.title')
+          PR_LABELS=$(echo "$PR_DATA" | jq -r '[.labels[].name] | join(",")')
+
+          echo "PR Title: $PR_TITLE" >> $GITHUB_STEP_SUMMARY
+          echo "PR Labels: $PR_LABELS" >> $GITHUB_STEP_SUMMARY
+
+          # Check if this is a DocSync documentation PR
+          if [[ "$PR_TITLE" == *"DocSync AI: Update Documentation"* ]] || [[ "$PR_LABELS" == *"documentation"* ]]; then
+            echo "is_docsync_pr=true" >> $GITHUB_OUTPUT
+            echo "✅ This is a DocSync documentation PR" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "is_docsync_pr=false" >> $GITHUB_OUTPUT
+            echo "⚠️ This is not a DocSync documentation PR - skipping refinement" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: 🤖 Run DocSync AI Refinement
+        if: steps.verify-pr.outputs.is_docsync_pr == 'true'
         id: refine
-        uses: akash-deriv/shared-actions/.github/actions/docsync_ai_comment@master
+        uses: akash-deriv/shared-actions/.github/actions/docsync_ai_refine@master
         with:
           github_token: ${{ secrets.DOCSYNC_GITHUB_TOKEN }}
           anthropic_api_key: ${{ secrets.DOCSYNC_ANTHROPIC_API_KEY }}
           repository: ${{ github.repository }}
           pr_number: ${{ github.event.issue.number }}
+          comment_id: ${{ github.event.comment.id }}
           comment_body: ${{ github.event.comment.body }}
+          comment_user: ${{ github.event.comment.user.login }}
 
       - name: ✅ Summary
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}
-          UPDATED: ${{ steps.refine.outputs.updated }}
-          VALID: ${{ steps.refine.outputs.suggestion_valid }}
-          IS_DOCSYNC_PR: ${{ steps.refine.outputs.is_docsync_pr }}
+          REFINEMENT_SUCCESS: ${{ steps.refine.outputs.refinement_success }}
+          CHANGES_MADE: ${{ steps.refine.outputs.changes_made }}
+          SANITIZATION_WARNING: ${{ steps.refine.outputs.sanitization_warning }}
         run: |
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| PR Number | #${{ github.event.issue.number }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Valid Comment | ${VALID:-false} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Is DocSync PR | ${IS_DOCSYNC_PR:-false} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Documentation Updated | ${UPDATED:-false} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Refinement Success | ${REFINEMENT_SUCCESS:-false} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Changes Made | ${CHANGES_MADE:-false} |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | $JOB_STATUS |" >> $GITHUB_STEP_SUMMARY
+
+          if [ -n "$SANITIZATION_WARNING" ]; then
+            echo "| Warning | $SANITIZATION_WARNING |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: 💬 Not a DocSync PR
+        if: steps.verify-pr.outputs.is_docsync_pr == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.DOCSYNC_GITHUB_TOKEN }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/issues/comments/$COMMENT_ID/reactions" \
+            -f content='confused' || true
+
+          gh pr comment "$PR_NUMBER" --body "ℹ️ **Not a DocSync PR**
+
+This PR was not created by DocSync AI. The @docsync refinement feature only works on documentation PRs created by DocSync AI.
+
+If you want to update documentation, please merge your code changes to the base branch, and DocSync AI will automatically create a documentation update PR.
+
+🤖 _DocSync AI Refinement_" || true
