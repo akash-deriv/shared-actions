@@ -1,4 +1,4 @@
-name: 📚 DocSync AI - Documentation Sync
+name: 📚 DocSync AI
 
 on:
   workflow_call:
@@ -50,7 +50,7 @@ on:
         required: false
 
 concurrency:
-  group: docsync-ai-${{ github.repository }}
+  group: docsync-ai-${{ github.repository }}-${{ github.event_name }}
   cancel-in-progress: false
 
 jobs:
@@ -59,7 +59,11 @@ jobs:
     runs-on: ubuntu-latest
 
     # Only run when a PR is merged to the base branch
-    if: github.event.pull_request.merged == true
+    # Skip if the merged PR is itself a DocSync documentation update PR (prevents infinite loop)
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      !contains(github.event.pull_request.title, 'DocSync AI: Update Documentation')
 
     permissions:
       contents: write
