@@ -1,0 +1,371 @@
+name: DocSync AI - Documentation Sync
+description: Automatically update documentation based on PR merges using Claude AI
+
+inputs:
+  github_token:
+    description: "GitHub token for repository operations and PR creation"
+    required: true
+  anthropic_api_key:
+    description: "Anthropic API key for Claude AI"
+    required: true
+  repository:
+    description: "Repository name (owner/repo)"
+    required: true
+  pr_number:
+    description: "Merged PR number that triggered this workflow"
+    required: true
+  pr_title:
+    description: "Merged PR title"
+    required: true
+  pr_body:
+    description: "Merged PR body/description"
+    required: false
+    default: ""
+  base_branch:
+    description: "Base branch for documentation PR (e.g., master or main)"
+    required: false
+    default: "master"
+  pr_labels:
+    description: "Comma-separated labels for the documentation PR"
+    required: false
+    default: "documentation,automated"
+
+outputs:
+  doc_pr_created:
+    description: "Whether a documentation PR was created"
+    value: ${{ steps.create-doc-pr.outputs.pr_created }}
+  doc_pr_number:
+    description: "Documentation PR number if created"
+    value: ${{ steps.create-doc-pr.outputs.pr_number }}
+  doc_pr_url:
+    description: "Documentation PR URL if created"
+    value: ${{ steps.create-doc-pr.outputs.pr_url }}
+
+runs:
+  using: composite
+  steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ inputs.github_token }}
+        ref: ${{ inputs.base_branch }}
+        fetch-depth: 0
+
+    - name: 🔍 Debug - Repository State
+      shell: bash
+      run: |
+        echo "## 🔍 Repository State" >> $GITHUB_STEP_SUMMARY
+        echo "Working directory: $(pwd)" >> $GITHUB_STEP_SUMMARY
+        echo "Current branch: $(git branch --show-current)" >> $GITHUB_STEP_SUMMARY
+        echo "Latest commit: $(git log -1 --oneline)" >> $GITHUB_STEP_SUMMARY
+
+        # Check for existing documentation files
+        if [ -f "README.md" ]; then
+          echo "✅ Found README.md" >> $GITHUB_STEP_SUMMARY
+        fi
+        if [ -f "CLAUDE.md" ]; then
+          echo "✅ Found CLAUDE.md" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: 📋 Fetch Merged PR Details
+      id: pr-details
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+      run: |
+        echo "## 📋 Merged PR Details" >> $GITHUB_STEP_SUMMARY
+        echo "Repository: ${{ inputs.repository }}" >> $GITHUB_STEP_SUMMARY
+        echo "PR #$PR_NUMBER: ${{ inputs.pr_title }}" >> $GITHUB_STEP_SUMMARY
+
+        # Get PR diff and files changed
+        PR_DIFF=$(gh api \
+          -H "Accept: application/vnd.github.v3.diff" \
+          "/repos/${{ inputs.repository }}/pulls/$PR_NUMBER" 2>&1)
+
+        # Save PR diff to file for Claude analysis
+        echo "$PR_DIFF" > /tmp/pr_diff.txt
+
+        # Get list of changed files
+        CHANGED_FILES=$(gh api \
+          -H "Accept: application/vnd.github+json" \
+          "/repos/${{ inputs.repository }}/pulls/$PR_NUMBER/files" \
+          --jq '.[].filename' 2>&1 || echo "")
+
+        echo "### Changed Files:" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo "$CHANGED_FILES" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+
+        echo "changed_files<<EOF" >> $GITHUB_OUTPUT
+        echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: 🤖 Run Claude 3.7 Sonnet Documentation Analysis
+      id: claude-analysis
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        REPO_NAME: ${{ inputs.repository }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+        PR_TITLE: ${{ inputs.pr_title }}
+        PR_BODY: ${{ inputs.pr_body }}
+        BASE_BRANCH: ${{ inputs.base_branch }}
+      run: |
+        set -e
+
+        echo "## 🤖 Claude 3.7 Sonnet Analysis" >> $GITHUB_STEP_SUMMARY
+        echo "Model: claude-3-7-sonnet-latest" >> $GITHUB_STEP_SUMMARY
+
+        # Determine which documentation file exists
+        DOC_FILE=""
+        if [ -f "README.md" ]; then
+          DOC_FILE="README.md"
+          echo "Documentation file: README.md" >> $GITHUB_STEP_SUMMARY
+        elif [ -f "CLAUDE.md" ]; then
+          DOC_FILE="CLAUDE.md"
+          echo "Documentation file: CLAUDE.md" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ No documentation file found (README.md or CLAUDE.md)" >> $GITHUB_STEP_SUMMARY
+          echo "skip_analysis=true" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        # Read current documentation
+        DOC_CONTENT=$(cat "$DOC_FILE")
+
+        # Read PR diff
+        PR_DIFF=$(cat /tmp/pr_diff.txt || echo "No diff available")
+
+        # Get repository structure
+        REPO_STRUCTURE=$(find . -type f -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -o -name "*.py" -o -name "*.go" -o -name "*.java" | grep -v node_modules | grep -v ".git" | head -50 || echo "")
+
+        # Prepare the prompt
+        cat > /tmp/claude_prompt.txt << 'PROMPT_EOF'
+        You are a technical documentation expert. Analyze the PR changes and determine if documentation needs updates.
+
+        # Context
+        Repository: ${REPO_NAME}
+        PR #${PR_NUMBER}: ${PR_TITLE}
+        PR Description: ${PR_BODY}
+
+        # Current Documentation File: ${DOC_FILE}
+        ${DOC_CONTENT}
+
+        # PR Changes (Diff):
+        ${PR_DIFF}
+
+        # Repository Structure (sample):
+        ${REPO_STRUCTURE}
+
+        # Your Task
+        Analyze the PR changes and determine if the documentation needs to be updated.
+
+        ## Rules (CRITICAL - MUST FOLLOW):
+        1. **Only update existing files**: Update the documentation file provided above. DO NOT create new files.
+        2. **Partial updates only**: Only modify sections relevant to the changes. Keep all other content unchanged.
+        3. **Significance check**: Only update if changes are significant (new features, major fixes, API changes). Skip minor changes (typos, formatting, small refactors).
+        4. **No other file modifications**: Do not touch any files except the documentation file.
+        5. **No additional suggestions**: Do not suggest other improvements or changes.
+
+        ## Analysis Steps:
+        1. Analyze the PR diff to understand what changed
+        2. Review the current documentation
+        3. Determine if the changes warrant documentation updates based on significance
+        4. If significant: Identify which sections need updates and provide the COMPLETE updated documentation
+        5. If not significant: Respond with "NO_UPDATES_NEEDED"
+
+        ## Output Format:
+        If updates are needed, output ONLY the complete updated documentation content, nothing else.
+        If no updates are needed, output exactly: NO_UPDATES_NEEDED
+
+        Do not include any explanations, markdown code blocks, or extra text. Just the raw documentation content or "NO_UPDATES_NEEDED".
+        PROMPT_EOF
+
+        # Expand variables in prompt
+        FULL_PROMPT=$(eval "cat <<PROMPT_EVAL
+        $(cat /tmp/claude_prompt.txt)
+        PROMPT_EVAL
+        ")
+
+        # Call Claude API
+        echo "Calling Claude 3.7 Sonnet API..." >> $GITHUB_STEP_SUMMARY
+
+        RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+          -H "content-type: application/json" \
+          -H "x-api-key: $ANTHROPIC_API_KEY" \
+          -H "anthropic-version: 2023-06-01" \
+          -d "{
+            \"model\": \"claude-3-7-sonnet-latest\",
+            \"max_tokens\": 8192,
+            \"messages\": [{
+              \"role\": \"user\",
+              \"content\": $(echo "$FULL_PROMPT" | jq -Rs .)
+            }]
+          }")
+
+        # Check for API errors
+        if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
+          ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message')
+          echo "❌ Claude API Error: $ERROR_MSG" >> $GITHUB_STEP_SUMMARY
+          echo "skip_analysis=true" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+        # Extract the response content
+        CLAUDE_OUTPUT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+
+        # Check if updates are needed
+        if echo "$CLAUDE_OUTPUT" | grep -q "NO_UPDATES_NEEDED"; then
+          echo "✅ Claude determined no documentation updates needed" >> $GITHUB_STEP_SUMMARY
+          echo "skip_analysis=true" >> $GITHUB_OUTPUT
+        else
+          echo "📝 Claude provided documentation updates" >> $GITHUB_STEP_SUMMARY
+          # Write the updated documentation
+          echo "$CLAUDE_OUTPUT" > "$DOC_FILE"
+          echo "skip_analysis=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: 🔍 Check for Documentation Changes
+      id: check-changes
+      if: steps.claude-analysis.outputs.skip_analysis != 'true'
+      shell: bash
+      run: |
+        # Check if documentation files were modified
+        git add -A
+
+        if git diff --cached --quiet; then
+          echo "has_changes=false" >> $GITHUB_OUTPUT
+          echo "✅ No documentation updates needed" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "📝 Documentation updates detected" >> $GITHUB_STEP_SUMMARY
+
+          # Show what changed
+          echo "### Changed Files:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          git diff --cached --name-only >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          # Verify only documentation files changed
+          CHANGED=$(git diff --cached --name-only)
+          INVALID_FILES=""
+
+          for file in $CHANGED; do
+            if [[ "$file" != "README.md" ]] && [[ "$file" != "CLAUDE.md" ]]; then
+              INVALID_FILES="$INVALID_FILES $file"
+            fi
+          done
+
+          if [ -n "$INVALID_FILES" ]; then
+            echo "❌ ERROR: Non-documentation files were modified:$INVALID_FILES" >> $GITHUB_STEP_SUMMARY
+            echo "Only README.md and CLAUDE.md should be updated." >> $GITHUB_STEP_SUMMARY
+            git reset --hard
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+        fi
+
+    - name: 🗑️ Close Existing DocSync PRs
+      if: steps.check-changes.outputs.has_changes == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        echo "Checking for existing DocSync AI PRs..."
+
+        # Find and close any existing documentation update PRs
+        EXISTING_PRS=$(gh pr list \
+          --search "DocSync AI: Update Documentation" \
+          --state open \
+          --json number \
+          --jq '.[].number' 2>/dev/null || echo "")
+
+        if [ -n "$EXISTING_PRS" ]; then
+          echo "Found existing PRs to close:"
+          for pr in $EXISTING_PRS; do
+            echo "  Closing PR #$pr..."
+            gh pr close "$pr" \
+              --comment "🔄 Closing stale documentation PR. A fresh update will be created." \
+              --delete-branch 2>/dev/null || echo "  Could not close PR #$pr"
+          done
+          echo "🗑️ Closed $(echo "$EXISTING_PRS" | wc -w | tr -d ' ') existing PR(s)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "No existing DocSync AI PRs found"
+        fi
+
+    - name: 🔀 Create Documentation PR
+      id: create-doc-pr
+      if: steps.check-changes.outputs.has_changes == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        BASE_BRANCH: ${{ inputs.base_branch }}
+        PR_LABELS: ${{ inputs.pr_labels }}
+        MERGED_PR_NUMBER: ${{ inputs.pr_number }}
+        MERGED_PR_TITLE: ${{ inputs.pr_title }}
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        BRANCH="docs/auto-update-$(date +%Y%m%d-%H%M%S)"
+        git checkout -b "$BRANCH"
+
+        # Add only documentation files
+        git add README.md CLAUDE.md 2>/dev/null || true
+
+        git commit -m "📚 DocSync AI: Update documentation for PR #$MERGED_PR_NUMBER
+
+        Automatically updated documentation based on changes from:
+        - PR #$MERGED_PR_NUMBER: $MERGED_PR_TITLE
+
+        Generated by DocSync AI"
+
+        git push origin "$BRANCH"
+
+        # Create PR
+        PR_URL=$(gh pr create \
+          --title "📚 DocSync AI: Update Documentation for PR #$MERGED_PR_NUMBER" \
+          --body "## 📚 Automated Documentation Update
+
+        This PR updates the documentation based on changes merged in PR #$MERGED_PR_NUMBER.
+
+        ### 🔄 Source PR
+        - **PR**: #$MERGED_PR_NUMBER
+        - **Title**: $MERGED_PR_TITLE
+
+        ### 📝 Changes
+        Documentation has been automatically updated to reflect the latest changes in the codebase.
+
+        ### ✅ Review Checklist
+        - [ ] Documentation accurately reflects the code changes
+        - [ ] No unrelated sections were modified
+        - [ ] Formatting and style are consistent
+        - [ ] Examples and code snippets are up to date
+
+        ---
+        🤖 *Automated by DocSync AI*
+        " \
+          --base "$BASE_BRANCH" \
+          --head "$BRANCH")
+
+        # Add labels
+        PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+        for label in $(echo "$PR_LABELS" | tr ',' ' '); do
+          gh pr edit "$PR_NUMBER" --add-label "$label" 2>/dev/null || echo "Label '$label' not found, skipping"
+        done
+
+        echo "pr_created=true" >> $GITHUB_OUTPUT
+        echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+        echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔀 Documentation PR Created: #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
+        echo "$PR_URL" >> $GITHUB_STEP_SUMMARY
+
+    - name: ✅ No Updates Needed
+      if: steps.claude-analysis.outputs.skip_analysis == 'true' || steps.check-changes.outputs.has_changes == 'false'
+      shell: bash
+      run: |
+        echo "pr_created=false" >> $GITHUB_OUTPUT
+        echo "✅ Documentation is up to date - no changes needed" >> $GITHUB_STEP_SUMMARY
