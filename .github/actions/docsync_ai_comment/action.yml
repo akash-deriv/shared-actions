@@ -1,0 +1,318 @@
+name: DocSync AI - Update from Comment
+description: Update documentation in existing DocSync PR based on user comment suggestions
+
+inputs:
+  github_token:
+    description: "GitHub token for repository operations and PR creation"
+    required: true
+  anthropic_api_key:
+    description: "Anthropic API key for Claude AI"
+    required: true
+  repository:
+    description: "Repository name (owner/repo)"
+    required: true
+  pr_number:
+    description: "PR number where comment was made"
+    required: true
+  comment_body:
+    description: "Comment body with user suggestion (must start with 'docsync:')"
+    required: true
+  base_branch:
+    description: "Base branch for documentation PR (e.g., master or main)"
+    required: false
+    default: "master"
+
+outputs:
+  updated:
+    description: "Whether documentation was updated"
+    value: ${{ steps.commit-changes.outputs.updated }}
+  suggestion_valid:
+    description: "Whether the comment had valid docsync prefix"
+    value: ${{ steps.validate.outputs.valid }}
+  is_docsync_pr:
+    description: "Whether the PR is a DocSync PR"
+    value: ${{ steps.verify-pr.outputs.is_docsync_pr }}
+
+runs:
+  using: composite
+  steps:
+    - name: ✅ Validate Comment Prefix
+      id: validate
+      shell: bash
+      env:
+        COMMENT_BODY: ${{ inputs.comment_body }}
+      run: |
+        echo "## ✅ Validating Comment" >> $GITHUB_STEP_SUMMARY
+
+        # Check if comment starts with "docsync:" (case-insensitive)
+        if echo "$COMMENT_BODY" | grep -i "^docsync:" > /dev/null; then
+          echo "valid=true" >> $GITHUB_OUTPUT
+          echo "✅ Valid docsync comment detected" >> $GITHUB_STEP_SUMMARY
+
+          # Extract suggestion (everything after "docsync:")
+          SUGGESTION=$(echo "$COMMENT_BODY" | sed -E 's/^[Dd][Oo][Cc][Ss][Yy][Nn][Cc]:[[:space:]]*//')
+          echo "suggestion<<EOF" >> $GITHUB_OUTPUT
+          echo "$SUGGESTION" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "### User Suggestion:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "$SUGGESTION" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        else
+          echo "valid=false" >> $GITHUB_OUTPUT
+          echo "❌ Comment does not start with 'docsync:' - skipping" >> $GITHUB_STEP_SUMMARY
+          exit 0
+        fi
+
+    - name: 🔍 Verify DocSync PR
+      id: verify-pr
+      if: steps.validate.outputs.valid == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+      run: |
+        echo "## 🔍 Verifying DocSync PR" >> $GITHUB_STEP_SUMMARY
+
+        # Get PR details including labels and title
+        PR_DATA=$(gh api \
+          -H "Accept: application/vnd.github+json" \
+          "/repos/${{ inputs.repository }}/pulls/$PR_NUMBER")
+
+        # Extract labels
+        PR_LABELS=$(echo "$PR_DATA" | jq -r '.labels[].name' 2>&1 || echo "")
+
+        # Extract PR title
+        PR_TITLE=$(echo "$PR_DATA" | jq -r '.title' 2>&1 || echo "")
+
+        # Extract PR branch
+        PR_BRANCH=$(echo "$PR_DATA" | jq -r '.head.ref' 2>&1)
+
+        echo "### PR Information:" >> $GITHUB_STEP_SUMMARY
+        echo "- **Title**: $PR_TITLE" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch**: $PR_BRANCH" >> $GITHUB_STEP_SUMMARY
+        echo "- **Labels**: ${PR_LABELS:-'(none)'}" >> $GITHUB_STEP_SUMMARY
+
+        # Check if PR has docsync-ai or automated label, OR if title contains "DocSync"
+        IS_DOCSYNC_PR=false
+
+        if echo "$PR_LABELS" | grep -qE "(docsync-ai|automated)"; then
+          IS_DOCSYNC_PR=true
+          echo "✅ PR has DocSync label" >> $GITHUB_STEP_SUMMARY
+        elif echo "$PR_TITLE" | grep -qi "docsync"; then
+          IS_DOCSYNC_PR=true
+          echo "✅ PR title contains 'DocSync'" >> $GITHUB_STEP_SUMMARY
+        fi
+
+        if [ "$IS_DOCSYNC_PR" = true ]; then
+          echo "is_docsync_pr=true" >> $GITHUB_OUTPUT
+          echo "pr_branch=$PR_BRANCH" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Verified as DocSync PR**" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "is_docsync_pr=false" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "❌ **Not a DocSync PR**" >> $GITHUB_STEP_SUMMARY
+          echo "This feature only works on DocSync PRs (with 'docsync-ai'/'automated' labels or 'DocSync' in title)" >> $GITHUB_STEP_SUMMARY
+          exit 0
+        fi
+
+    - name: 📥 Checkout PR Branch
+      if: steps.verify-pr.outputs.is_docsync_pr == 'true'
+      uses: actions/checkout@v4
+      with:
+        token: ${{ inputs.github_token }}
+        ref: ${{ steps.verify-pr.outputs.pr_branch }}
+        fetch-depth: 0
+
+    - name: 🤖 Run Claude 3.7 Sonnet Documentation Analysis
+      id: claude-analysis
+      if: steps.verify-pr.outputs.is_docsync_pr == 'true'
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        REPO_NAME: ${{ inputs.repository }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+        USER_SUGGESTION: ${{ steps.validate.outputs.suggestion }}
+      run: |
+        set -e
+
+        echo "## 🤖 Claude 3.7 Sonnet Analysis" >> $GITHUB_STEP_SUMMARY
+        echo "Model: claude-3-7-sonnet-latest" >> $GITHUB_STEP_SUMMARY
+
+        # Determine which documentation file exists
+        DOC_FILE=""
+        if [ -f "README.md" ]; then
+          DOC_FILE="README.md"
+          echo "Documentation file: README.md" >> $GITHUB_STEP_SUMMARY
+        elif [ -f "CLAUDE.md" ]; then
+          DOC_FILE="CLAUDE.md"
+          echo "Documentation file: CLAUDE.md" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ No documentation file found (README.md or CLAUDE.md)" >> $GITHUB_STEP_SUMMARY
+          echo "skip_analysis=true" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        # Read current documentation
+        DOC_CONTENT=$(cat "$DOC_FILE")
+
+        # Prepare the prompt
+        cat > /tmp/claude_prompt.txt << 'PROMPT_EOF'
+        You are a technical documentation expert. A user has provided a suggestion for improving the documentation in a DocSync PR.
+
+        # Context
+        Repository: ${REPO_NAME}
+        PR #${PR_NUMBER} (DocSync Documentation PR)
+
+        # Current Documentation File: ${DOC_FILE}
+        ${DOC_CONTENT}
+
+        # User Suggestion:
+        ${USER_SUGGESTION}
+
+        # Your Task
+        Apply the user's suggestion to update the documentation appropriately.
+
+        ## Rules (CRITICAL - MUST FOLLOW):
+        1. **Only update existing files**: Update the documentation file provided above. DO NOT create new files.
+        2. **Follow user intent**: Carefully interpret and apply the user's suggestion. If the suggestion is vague, make reasonable improvements.
+        3. **Partial updates only**: Only modify sections relevant to the suggestion. Keep all other content unchanged.
+        4. **No other file modifications**: Do not touch any files except the documentation file.
+        5. **Quality standards**: Ensure updates are accurate, clear, and improve documentation quality.
+
+        ## Analysis Steps:
+        1. Review the current documentation
+        2. Understand the user's suggestion and intent
+        3. Identify which sections need updates
+        4. Apply the changes while maintaining documentation quality and consistency
+        5. Output the COMPLETE updated documentation
+
+        ## Output Format:
+        Output ONLY the complete updated documentation content, nothing else.
+
+        Do not include any explanations, markdown code blocks, or extra text. Just the raw documentation content.
+        PROMPT_EOF
+
+        # Expand variables in prompt
+        FULL_PROMPT=$(eval "cat <<PROMPT_EVAL
+        $(cat /tmp/claude_prompt.txt)
+        PROMPT_EVAL
+        ")
+
+        # Call Claude API
+        echo "Calling Claude 3.7 Sonnet API..." >> $GITHUB_STEP_SUMMARY
+
+        RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+          -H "content-type: application/json" \
+          -H "x-api-key: $ANTHROPIC_API_KEY" \
+          -H "anthropic-version: 2023-06-01" \
+          -d "{
+            \"model\": \"claude-3-7-sonnet-latest\",
+            \"max_tokens\": 8192,
+            \"messages\": [{
+              \"role\": \"user\",
+              \"content\": $(echo "$FULL_PROMPT" | jq -Rs .)
+            }]
+          }")
+
+        # Check for API errors
+        if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
+          ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message')
+          echo "❌ Claude API Error: $ERROR_MSG" >> $GITHUB_STEP_SUMMARY
+          echo "skip_analysis=true" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+        # Extract the response content
+        CLAUDE_OUTPUT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+
+        echo "📝 Claude provided documentation updates" >> $GITHUB_STEP_SUMMARY
+        # Write the updated documentation
+        echo "$CLAUDE_OUTPUT" > "$DOC_FILE"
+        echo "skip_analysis=false" >> $GITHUB_OUTPUT
+
+    - name: 💾 Commit Changes to PR
+      id: commit-changes
+      if: steps.claude-analysis.outputs.skip_analysis != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+      run: |
+        # Check if documentation files were modified
+        git add -A
+
+        if git diff --cached --quiet; then
+          echo "updated=false" >> $GITHUB_OUTPUT
+          echo "✅ No documentation updates needed" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "updated=true" >> $GITHUB_OUTPUT
+          echo "📝 Documentation updates detected" >> $GITHUB_STEP_SUMMARY
+
+          # Show what changed
+          echo "### Changed Files:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          git diff --cached --name-only >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          # Verify only documentation files changed
+          CHANGED=$(git diff --cached --name-only)
+          INVALID_FILES=""
+
+          for file in $CHANGED; do
+            if [[ "$file" != "README.md" ]] && [[ "$file" != "CLAUDE.md" ]]; then
+              INVALID_FILES="$INVALID_FILES $file"
+            fi
+          done
+
+          if [ -n "$INVALID_FILES" ]; then
+            echo "❌ ERROR: Non-documentation files were modified:$INVALID_FILES" >> $GITHUB_STEP_SUMMARY
+            echo "Only README.md and CLAUDE.md should be updated." >> $GITHUB_STEP_SUMMARY
+            git reset --hard
+            echo "updated=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          # Commit changes
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git commit -m "📚 DocSync AI: Apply user suggestion from comment
+
+        Applied documentation updates based on user comment in PR #$PR_NUMBER.
+
+        Generated by DocSync AI"
+
+          git push origin HEAD
+
+          # Add confirmation comment to PR
+          gh pr comment "$PR_NUMBER" \
+            --body "✅ **DocSync AI Update Applied**
+
+        Your documentation suggestion has been applied and committed to this PR.
+
+        📝 **Updated Files:**
+        $(git diff HEAD~1 --name-only | sed 's/^/- /')
+
+        ---
+        🤖 *Automated by DocSync AI*"
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ Changes Committed and Comment Added" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: 📊 Summary
+      if: always()
+      shell: bash
+      env:
+        VALID: ${{ steps.validate.outputs.valid }}
+        IS_DOCSYNC: ${{ steps.verify-pr.outputs.is_docsync_pr }}
+        UPDATED: ${{ steps.commit-changes.outputs.updated }}
+      run: |
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## 📊 Action Summary" >> $GITHUB_STEP_SUMMARY
+        echo "- **Comment Valid**: ${VALID:-false}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Is DocSync PR**: ${IS_DOCSYNC:-false}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Documentation Updated**: ${UPDATED:-false}" >> $GITHUB_STEP_SUMMARY
