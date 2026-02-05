@@ -189,7 +189,7 @@ runs:
         If updates are needed: Output ONLY the complete updated documentation content starting directly with the documentation text.
         If no updates are needed: Output exactly: NO_UPDATES_NEEDED
 
-        Do not include markdown code blocks (```), explanations, or any extra text. Just the raw documentation content or "NO_UPDATES_NEEDED".
+        Do not include markdown code blocks, explanations, or any extra text. Just the raw documentation content or "NO_UPDATES_NEEDED".
         PROMPT_EOF
 
         # Expand variables in prompt
