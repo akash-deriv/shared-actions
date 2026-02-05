@@ -142,7 +142,7 @@ runs:
 
         # Prepare the prompt
         cat > /tmp/claude_prompt.txt << 'PROMPT_EOF'
-        You are a technical documentation expert. Analyze the PR changes and determine if documentation needs updates.
+        You are a technical documentation expert and software architect. Analyze the PR changes and determine if documentation needs updates.
 
         # Context
         Repository: ${REPO_NAME}
@@ -167,6 +167,7 @@ runs:
         3. **Significance check**: Only update if changes are significant (new features, major fixes, API changes). Skip minor changes (typos, formatting, small refactors).
         4. **No other file modifications**: Do not touch any files except the documentation file.
         5. **No additional suggestions**: Do not suggest other improvements or changes.
+        6. **Update existing content only**: Only update or expand existing sections in the documentation that are relevant to the PR changes. Do NOT add new sections for entirely new features or files unless they directly relate to existing documented functionality.
 
         ## Analysis Steps:
         1. Analyze the PR diff to understand what changed
@@ -175,11 +176,20 @@ runs:
         4. If significant: Identify which sections need updates and provide the COMPLETE updated documentation
         5. If not significant: Respond with "NO_UPDATES_NEEDED"
 
-        ## Output Format:
-        If updates are needed, output ONLY the complete updated documentation content, nothing else.
-        If no updates are needed, output exactly: NO_UPDATES_NEEDED
+        ## Output Format - CRITICAL:
+        ABSOLUTE REQUIREMENT: Output ONLY the raw documentation content itself. NO explanations, NO preambles, NO analysis statements.
 
-        Do not include any explanations, markdown code blocks, or extra text. Just the raw documentation content or "NO_UPDATES_NEEDED".
+        DO NOT output phrases like:
+        - "I've analyzed..."
+        - "Here's the updated documentation:"
+        - "The PR adds..."
+        - "I've determined that..."
+        - Any commentary or meta-text
+
+        If updates are needed: Output ONLY the complete updated documentation content starting directly with the documentation text.
+        If no updates are needed: Output exactly: NO_UPDATES_NEEDED
+
+        Do not include markdown code blocks (```), explanations, or any extra text. Just the raw documentation content or "NO_UPDATES_NEEDED".
         PROMPT_EOF
 
         # Expand variables in prompt

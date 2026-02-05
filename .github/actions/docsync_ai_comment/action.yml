@@ -1,0 +1,560 @@
+name: DocSync AI - Refine Documentation
+description: Refine documentation based on human feedback comments starting with @docsync
+
+inputs:
+  github_token:
+    description: "GitHub token for repository operations"
+    required: true
+  anthropic_api_key:
+    description: "Anthropic API key for Claude AI"
+    required: true
+  repository:
+    description: "Repository name (owner/repo)"
+    required: true
+  pr_number:
+    description: "PR number where comment was made"
+    required: true
+  comment_id:
+    description: "Comment ID that triggered this refinement"
+    required: true
+  comment_body:
+    description: "Full comment body text"
+    required: true
+  comment_user:
+    description: "User who made the comment"
+    required: true
+
+outputs:
+  refinement_success:
+    description: "Whether refinement was successful"
+    value: ${{ steps.refine.outputs.success }}
+  changes_made:
+    description: "Whether documentation changes were made"
+    value: ${{ steps.commit-changes.outputs.has_changes }}
+  sanitization_warning:
+    description: "Warning message if comment was sanitized or blocked"
+    value: ${{ steps.sanitize.outputs.warning }}
+
+runs:
+  using: composite
+  steps:
+    - name: 🔍 Debug - PR and Comment Info
+      shell: bash
+      run: |
+        echo "## 🔍 Refinement Request Info" >> $GITHUB_STEP_SUMMARY
+        echo "PR Number: ${{ inputs.pr_number }}" >> $GITHUB_STEP_SUMMARY
+        echo "Comment ID: ${{ inputs.comment_id }}" >> $GITHUB_STEP_SUMMARY
+        echo "Requested by: @${{ inputs.comment_user }}" >> $GITHUB_STEP_SUMMARY
+        echo "Repository: ${{ inputs.repository }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+    - name: 🏷️ Verify DocSync PR
+      id: verify-pr
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+      run: |
+        echo "## 🏷️ PR Verification" >> $GITHUB_STEP_SUMMARY
+
+        # Get PR details
+        PR_DATA=$(gh api "/repos/${{ inputs.repository }}/pulls/$PR_NUMBER")
+        PR_TITLE=$(echo "$PR_DATA" | jq -r '.title')
+        PR_LABELS=$(echo "$PR_DATA" | jq -r '[.labels[].name] | join(",")')
+        PR_BRANCH=$(echo "$PR_DATA" | jq -r '.head.ref')
+
+        echo "PR Title: $PR_TITLE" >> $GITHUB_STEP_SUMMARY
+        echo "PR Labels: $PR_LABELS" >> $GITHUB_STEP_SUMMARY
+        echo "PR Branch: $PR_BRANCH" >> $GITHUB_STEP_SUMMARY
+
+        # Check if this is a DocSync documentation PR
+        if [[ "$PR_TITLE" == *"DocSync AI: Update Documentation"* ]] || \
+           [[ "$PR_LABELS" == *"documentation"* ]] || \
+           [[ "$PR_LABELS" == *"automated"* ]] || \
+           [[ "$PR_LABELS" == *"docsync"* ]]; then
+          echo "is_docsync_pr=true" >> $GITHUB_OUTPUT
+          echo "pr_branch=$PR_BRANCH" >> $GITHUB_OUTPUT
+          echo "✅ This is a DocSync documentation PR" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "is_docsync_pr=false" >> $GITHUB_OUTPUT
+          echo "⚠️ This is not a DocSync documentation PR - skipping refinement" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: 🛡️ Sanitize and Validate Comment
+      id: sanitize
+      if: steps.verify-pr.outputs.is_docsync_pr == 'true'
+      shell: bash
+      env:
+        COMMENT_BODY: ${{ inputs.comment_body }}
+      run: |
+        set -e
+
+        echo "## 🛡️ Comment Sanitization" >> $GITHUB_STEP_SUMMARY
+
+        # Extract the actual feedback (remove @docsync or docsync: prefix and trim)
+        FEEDBACK=$(echo "$COMMENT_BODY" | sed 's/@docsync//gi' | sed 's/docsync://gi' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+        # Check for blocked patterns (case-insensitive)
+        BLOCKED_PATTERNS=(
+          "secret"
+          "token"
+          "password"
+          "api[_-]key"
+          "credential"
+          "env"
+          "environment variable"
+          "\.env"
+          "access[_-]key"
+          "private[_-]key"
+          "ssh"
+          "\\.yml"
+          "\\.yaml"
+          "\\.json"
+          "\\.js"
+          "\\.ts"
+          "\\.py"
+          "\\.go"
+          "workflow"
+          "action"
+          "package\\.json"
+          "package-lock\\.json"
+          "node_modules"
+          "database"
+          "sql"
+          "\\.git"
+          "commit"
+          "push"
+          "merge"
+          "delete"
+          "remove file"
+          "modify.*file"
+          "update.*file"
+          "create.*file"
+          "add.*file"
+        )
+
+        BLOCKED=false
+        BLOCKED_REASON=""
+
+        for pattern in "${BLOCKED_PATTERNS[@]}"; do
+          if echo "$FEEDBACK" | grep -iE "$pattern" > /dev/null 2>&1; then
+            BLOCKED=true
+            BLOCKED_REASON="Comment contains restricted keyword: '$pattern'"
+            break
+          fi
+        done
+
+        # Additional check: Ensure comment is about README or CLAUDE docs only
+        if echo "$FEEDBACK" | grep -iE "(update|modify|change|edit).*(file|code|script|config)" > /dev/null 2>&1; then
+          if ! echo "$FEEDBACK" | grep -iE "(readme|claude\.md|documentation|docs)" > /dev/null 2>&1; then
+            BLOCKED=true
+            BLOCKED_REASON="Comment requests file modifications outside of documentation"
+          fi
+        fi
+
+        if [ "$BLOCKED" = true ]; then
+          echo "⛔ BLOCKED: $BLOCKED_REASON" >> $GITHUB_STEP_SUMMARY
+          echo "warning=blocked" >> $GITHUB_OUTPUT
+          echo "feedback=" >> $GITHUB_OUTPUT
+          echo "blocked_reason=$BLOCKED_REASON" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        # Check if feedback is meaningful (not empty or too short)
+        FEEDBACK_LENGTH=${#FEEDBACK}
+        if [ $FEEDBACK_LENGTH -lt 10 ]; then
+          echo "⚠️ Feedback too short (minimum 10 characters)" >> $GITHUB_STEP_SUMMARY
+          echo "warning=too_short" >> $GITHUB_OUTPUT
+          echo "feedback=" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        echo "✅ Comment validated successfully" >> $GITHUB_STEP_SUMMARY
+        echo "Feedback length: $FEEDBACK_LENGTH characters" >> $GITHUB_STEP_SUMMARY
+        echo "warning=" >> $GITHUB_OUTPUT
+
+        # Save sanitized feedback
+        echo "$FEEDBACK" > /tmp/sanitized_feedback.txt
+        echo "feedback<<EOF" >> $GITHUB_OUTPUT
+        echo "$FEEDBACK" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: 📥 Checkout PR Branch
+      if: steps.sanitize.outputs.warning == ''
+      uses: actions/checkout@v4
+      with:
+        token: ${{ inputs.github_token }}
+        repository: ${{ inputs.repository }}
+        ref: ${{ steps.verify-pr.outputs.pr_branch }}
+        fetch-depth: 0
+
+    - name: 📋 Get Original PR Context
+      id: pr-context
+      if: steps.sanitize.outputs.warning == ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+      run: |
+        echo "## 📋 Original PR Context" >> $GITHUB_STEP_SUMMARY
+
+        # Get PR details
+        PR_DATA=$(gh api "/repos/${{ inputs.repository }}/pulls/$PR_NUMBER")
+
+        # Extract original PR number from the DocSync PR body
+        ORIGINAL_PR_NUM=$(echo "$PR_DATA" | jq -r '.body' | grep -oP '(?<=PR #)\d+' | head -1)
+
+        if [ -z "$ORIGINAL_PR_NUM" ]; then
+          echo "⚠️ Could not find original PR number" >> $GITHUB_STEP_SUMMARY
+          echo "original_pr_found=false" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        echo "Original PR: #$ORIGINAL_PR_NUM" >> $GITHUB_STEP_SUMMARY
+        echo "original_pr_number=$ORIGINAL_PR_NUM" >> $GITHUB_OUTPUT
+        echo "original_pr_found=true" >> $GITHUB_OUTPUT
+
+        # Get original PR diff
+        ORIGINAL_PR_DIFF=$(gh api \
+          -H "Accept: application/vnd.github.v3.diff" \
+          "/repos/${{ inputs.repository }}/pulls/$ORIGINAL_PR_NUM" 2>&1)
+
+        echo "$ORIGINAL_PR_DIFF" > /tmp/original_pr_diff.txt
+
+        # Get original PR details
+        ORIGINAL_PR_DATA=$(gh api "/repos/${{ inputs.repository }}/pulls/$ORIGINAL_PR_NUM")
+        ORIGINAL_PR_TITLE=$(echo "$ORIGINAL_PR_DATA" | jq -r '.title')
+
+        echo "Original PR Title: $ORIGINAL_PR_TITLE" >> $GITHUB_STEP_SUMMARY
+
+        echo "original_pr_title<<EOF" >> $GITHUB_OUTPUT
+        echo "$ORIGINAL_PR_TITLE" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: 🤖 Run Claude AI Refinement
+      id: refine
+      if: steps.sanitize.outputs.warning == '' && steps.pr-context.outputs.original_pr_found == 'true'
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        REPO_NAME: ${{ inputs.repository }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+        ORIGINAL_PR_NUMBER: ${{ steps.pr-context.outputs.original_pr_number }}
+        ORIGINAL_PR_TITLE: ${{ steps.pr-context.outputs.original_pr_title }}
+        HUMAN_FEEDBACK: ${{ steps.sanitize.outputs.feedback }}
+        COMMENT_USER: ${{ inputs.comment_user }}
+      run: |
+        set -e
+
+        echo "## 🤖 Claude AI Refinement" >> $GITHUB_STEP_SUMMARY
+        echo "Model: claude-3-7-sonnet-latest" >> $GITHUB_STEP_SUMMARY
+
+        # Determine which documentation file exists
+        DOC_FILE=""
+        if [ -f "README.md" ]; then
+          DOC_FILE="README.md"
+          echo "Documentation file: README.md" >> $GITHUB_STEP_SUMMARY
+        elif [ -f "CLAUDE.md" ]; then
+          DOC_FILE="CLAUDE.md"
+          echo "Documentation file: CLAUDE.md" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ No documentation file found (README.md or CLAUDE.md)" >> $GITHUB_STEP_SUMMARY
+          echo "success=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+        # Read current documentation
+        DOC_CONTENT=$(cat "$DOC_FILE")
+
+        # Read original PR diff
+        ORIGINAL_DIFF=$(cat /tmp/original_pr_diff.txt || echo "No diff available")
+
+        # Read human feedback
+        FEEDBACK=$(cat /tmp/sanitized_feedback.txt)
+
+        # Prepare the refinement prompt
+        cat > /tmp/claude_refine_prompt.txt << 'PROMPT_EOF'
+You are a technical documentation expert and software architect tasked with refining documentation based on human feedback.
+
+# Context
+Repository: ${REPO_NAME}
+Documentation PR: #${PR_NUMBER}
+Original Code PR: #${ORIGINAL_PR_NUMBER} - ${ORIGINAL_PR_TITLE}
+
+# Current Documentation (${DOC_FILE}):
+${DOC_CONTENT}
+
+# Original Code Changes (from PR #${ORIGINAL_PR_NUMBER}):
+${ORIGINAL_DIFF}
+
+# Human Feedback from @${COMMENT_USER}:
+${FEEDBACK}
+
+# Your Task
+Refine the documentation based STRICTLY on the human feedback provided above.
+
+## CRITICAL RULES (MUST FOLLOW):
+1. **Follow feedback exactly**: Only make changes requested in the human feedback. Do not add anything extra.
+2. **README/CLAUDE.md only**: You can ONLY modify the documentation file shown above. No other files.
+3. **No hallucinations**: Do not invent features, capabilities, or information not present in the code changes.
+4. **No additional suggestions**: Do not suggest improvements beyond what was requested.
+5. **Preserve structure**: Keep the overall documentation structure and formatting intact.
+6. **Partial updates only**: Only modify the specific sections mentioned in the feedback.
+7. **Stay focused**: Address only the feedback points. Do not "improve" other sections.
+8. **Update existing content only**: Only update or expand existing sections that are relevant to the feedback.
+
+## Refinement Steps:
+1. Carefully read and understand the human feedback
+2. Identify which parts of the documentation need to be changed
+3. Make ONLY the changes requested in the feedback
+4. Ensure changes are accurate based on the original code changes
+5. Maintain consistency with the rest of the documentation
+
+## Output Format - CRITICAL:
+ABSOLUTE REQUIREMENT: Output ONLY the raw documentation content itself. NO explanations, NO preambles, NO analysis statements.
+
+DO NOT output phrases like:
+- "I've refined..."
+- "Based on your feedback..."
+- "Here's the updated documentation:"
+- "The changes include..."
+- Any commentary or meta-text
+
+Output ONLY the complete refined documentation content starting directly with the documentation text.
+Do not include markdown code blocks (```), explanations, or any extra text.
+Just the raw documentation content.
+PROMPT_EOF
+
+        # Expand variables in prompt
+        FULL_PROMPT=$(eval "cat <<PROMPT_EVAL
+$(cat /tmp/claude_refine_prompt.txt)
+PROMPT_EVAL
+")
+
+        # Call Claude API
+        echo "Calling Claude API for refinement..." >> $GITHUB_STEP_SUMMARY
+
+        RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+          -H "content-type: application/json" \
+          -H "x-api-key: $ANTHROPIC_API_KEY" \
+          -H "anthropic-version: 2023-06-01" \
+          -d "{
+            \"model\": \"claude-3-7-sonnet-latest\",
+            \"max_tokens\": 8192,
+            \"messages\": [{
+              \"role\": \"user\",
+              \"content\": $(echo "$FULL_PROMPT" | jq -Rs .)
+            }]
+          }")
+
+        # Check for API errors
+        if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
+          ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message')
+          echo "❌ Claude API Error: $ERROR_MSG" >> $GITHUB_STEP_SUMMARY
+          echo "success=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+        # Extract the refined documentation
+        REFINED_DOC=$(echo "$RESPONSE" | jq -r '.content[0].text')
+
+        # Write the refined documentation
+        echo "$REFINED_DOC" > "$DOC_FILE"
+
+        echo "✅ Documentation refined based on feedback" >> $GITHUB_STEP_SUMMARY
+        echo "success=true" >> $GITHUB_OUTPUT
+
+    - name: 🔍 Check for Changes
+      id: commit-changes
+      if: steps.refine.outputs.success == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        COMMENT_USER: ${{ inputs.comment_user }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+      run: |
+        # Configure git
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        # Check if documentation files were modified
+        git add README.md CLAUDE.md 2>/dev/null || true
+
+        if git diff --cached --quiet; then
+          echo "has_changes=false" >> $GITHUB_OUTPUT
+          echo "ℹ️ No changes were made to documentation" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "📝 Documentation changes detected" >> $GITHUB_STEP_SUMMARY
+
+          # Show what changed
+          # Show what changed
+          echo "### Changed Files:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          git diff --cached --name-only >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          # Verify only documentation files changed
+          CHANGED=$(git diff --cached --name-only)
+          INVALID_FILES=""
+
+          for file in $CHANGED; do
+            if [[ "$file" != "README.md" ]] && [[ "$file" != "CLAUDE.md" ]]; then
+              INVALID_FILES="$INVALID_FILES $file"
+            fi
+          done
+
+          if [ -n "$INVALID_FILES" ]; then
+            echo "❌ ERROR: Non-documentation files were modified:$INVALID_FILES" >> $GITHUB_STEP_SUMMARY
+            git reset --hard
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          # Commit changes
+          git commit -m "📝 Refine documentation based on @${COMMENT_USER} feedback
+
+Refined documentation based on human review feedback from PR #${PR_NUMBER}.
+
+Generated by DocSync AI Refinement"
+
+          # Push changes
+          git push
+
+          echo "✅ Changes committed and pushed" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: 💬 Reply to Comment - Success
+      if: steps.commit-changes.outputs.has_changes == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        COMMENT_ID: ${{ inputs.comment_id }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+      run: |
+        gh api \
+          --method POST \
+          -H "Accept: application/vnd.github+json" \
+          "/repos/${{ inputs.repository }}/issues/comments/$COMMENT_ID/reactions" \
+          -f content='rocket' || true
+
+        gh pr comment "$PR_NUMBER" --body "✅ **Documentation refined successfully!**
+
+I've updated the documentation based on your feedback. Please review the changes.
+
+🤖 _DocSync AI Refinement_"
+
+    - name: 💬 Reply to Comment - No Changes
+      if: steps.refine.outputs.success == 'true' && steps.commit-changes.outputs.has_changes == 'false'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        COMMENT_ID: ${{ inputs.comment_id }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+      run: |
+        gh api \
+          --method POST \
+          -H "Accept: application/vnd.github+json" \
+          "/repos/${{ inputs.repository }}/issues/comments/$COMMENT_ID/reactions" \
+          -f content='eyes' || true
+
+        gh pr comment "$PR_NUMBER" --body "ℹ️ **No changes needed**
+
+Based on your feedback, the current documentation already meets the requirements. No modifications were necessary.
+
+🤖 _DocSync AI Refinement_"
+
+    - name: 💬 Reply to Comment - Blocked
+      if: steps.sanitize.outputs.warning == 'blocked'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        COMMENT_ID: ${{ inputs.comment_id }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+        BLOCKED_REASON: ${{ steps.sanitize.outputs.blocked_reason }}
+      run: |
+        gh api \
+          --method POST \
+          -H "Accept: application/vnd.github+json" \
+          "/repos/${{ inputs.repository }}/issues/comments/$COMMENT_ID/reactions" \
+          -f content='-1' || true
+
+        gh pr comment "$PR_NUMBER" --body "⛔ **Request blocked**
+
+$BLOCKED_REASON
+
+**DocSync AI can only update README.md or CLAUDE.md documentation files.**
+
+Please ensure your comment:
+- ✅ Only requests documentation updates
+- ❌ Does not reference other files, secrets, or code modifications
+- ❌ Does not request access to sensitive information
+
+🤖 _DocSync AI Refinement_"
+
+    - name: 💬 Reply to Comment - Invalid Feedback
+      if: steps.sanitize.outputs.warning == 'too_short'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        COMMENT_ID: ${{ inputs.comment_id }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+      run: |
+        gh api \
+          --method POST \
+          -H "Accept: application/vnd.github+json" \
+          "/repos/${{ inputs.repository }}/issues/comments/$COMMENT_ID/reactions" \
+          -f content='confused' || true
+
+        gh pr comment "$PR_NUMBER" --body "⚠️ **Feedback too short**
+
+Please provide more detailed feedback (at least 10 characters) about what should be changed in the documentation.
+
+Example:
+\`\`\`
+@docsync Please add more details about the installation process and include example commands.
+\`\`\`
+
+🤖 _DocSync AI Refinement_"
+
+    - name: 💬 Reply to Comment - Not DocSync PR
+      if: steps.verify-pr.outputs.is_docsync_pr == 'false'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        COMMENT_ID: ${{ inputs.comment_id }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+      run: |
+        gh api \
+          --method POST \
+          -H "Accept: application/vnd.github+json" \
+          "/repos/${{ inputs.repository }}/issues/comments/$COMMENT_ID/reactions" \
+          -f content='confused' || true
+
+        gh pr comment "$PR_NUMBER" --body "ℹ️ **Not a DocSync PR**
+
+This PR was not created by DocSync AI. The @docsync refinement feature only works on documentation PRs created by DocSync AI.
+
+If you want to update documentation, please merge your code changes to the base branch, and DocSync AI will automatically create a documentation update PR.
+
+🤖 _DocSync AI Refinement_" || true
+
+    - name: 💬 Reply to Comment - Error
+      if: failure() && steps.sanitize.outputs.warning == ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        COMMENT_ID: ${{ inputs.comment_id }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+      run: |
+        gh api \
+          --method POST \
+          -H "Accept: application/vnd.github+json" \
+          "/repos/${{ inputs.repository }}/issues/comments/$COMMENT_ID/reactions" \
+          -f content='confused' || true
+
+        gh pr comment "$PR_NUMBER" --body "❌ **Refinement failed**
+
+An error occurred while processing your feedback. Please try again or contact the repository maintainers if the issue persists.
+
+🤖 _DocSync AI Refinement_" || true
