@@ -23,6 +23,21 @@ on:
         required: false
         default: ''
         type: string
+      trigger_type:
+        description: 'Trigger type: "merge" for PR merge, "comment" for PR comment'
+        required: false
+        default: 'merge'
+        type: string
+      comment_body:
+        description: 'Comment body (only for comment trigger, must start with "docsync:")'
+        required: false
+        default: ''
+        type: string
+      comment_pr_number:
+        description: 'PR number where comment was made (only for comment trigger)'
+        required: false
+        default: ''
+        type: string
     secrets:
       DOCSYNC_GITHUB_TOKEN:
         description: 'GitHub PAT for PR creation (repo-specific, needs repo and pull_requests permissions)'
@@ -166,58 +181,50 @@ jobs:
           echo "| Status | $JOB_STATUS |" >> $GITHUB_STEP_SUMMARY
           echo "| Base Branch | $BASE_BRANCH |" >> $GITHUB_STEP_SUMMARY
 
-  refine-documentation:
-    name: 📝 Refine Documentation
+  update-from-comment:
+    name: 💬 Update Documentation from Comment
     runs-on: ubuntu-latest
 
-    # Only run on issue_comment events (when someone comments on a PR)
-    if: github.event_name == 'issue_comment' && github.event.issue.pull_request && (startsWith(github.event.comment.body, '@docsync') || startsWith(github.event.comment.body, 'docsync:'))
+    # Only run when trigger_type is 'comment'
+    if: inputs.trigger_type == 'comment'
 
     permissions:
       contents: write
       pull-requests: write
-      issues: write
 
     steps:
-      - name: 🔍 Debug - Comment Info
+      - name: 🔍 Debug - Comment Trigger Info
         run: |
           echo "## 🔍 Comment Trigger Info" >> $GITHUB_STEP_SUMMARY
-          echo "Event: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "Action: ${{ github.event.action }}" >> $GITHUB_STEP_SUMMARY
-          echo "Issue/PR Number: ${{ github.event.issue.number }}" >> $GITHUB_STEP_SUMMARY
-          echo "Comment ID: ${{ github.event.comment.id }}" >> $GITHUB_STEP_SUMMARY
-          echo "Comment Author: @${{ github.event.comment.user.login }}" >> $GITHUB_STEP_SUMMARY
+          echo "Trigger Type: ${{ inputs.trigger_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "PR Number: ${{ inputs.comment_pr_number }}" >> $GITHUB_STEP_SUMMARY
           echo "Repository: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
 
-      - name: 🤖 Run DocSync AI Refinement Action
-        id: refine
+      - name: 🤖 Run DocSync AI Comment Action
+        id: docsync-comment
         uses: akash-deriv/shared-actions/.github/actions/docsync_ai_comment@master
         with:
           github_token: ${{ secrets.DOCSYNC_GITHUB_TOKEN }}
           anthropic_api_key: ${{ secrets.DOCSYNC_ANTHROPIC_API_KEY }}
           repository: ${{ github.repository }}
-          pr_number: ${{ github.event.issue.number }}
-          comment_id: ${{ github.event.comment.id }}
-          comment_body: ${{ github.event.comment.body }}
-          comment_user: ${{ github.event.comment.user.login }}
+          pr_number: ${{ inputs.comment_pr_number }}
+          comment_body: ${{ inputs.comment_body }}
+          base_branch: ${{ inputs.base_branch }}
 
       - name: ✅ Summary
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}
-          REFINEMENT_SUCCESS: ${{ steps.refine.outputs.refinement_success }}
-          CHANGES_MADE: ${{ steps.refine.outputs.changes_made }}
-          SANITIZATION_WARNING: ${{ steps.refine.outputs.sanitization_warning }}
+          UPDATED: ${{ steps.docsync-comment.outputs.updated }}
+          VALID: ${{ steps.docsync-comment.outputs.suggestion_valid }}
+          IS_DOCSYNC_PR: ${{ steps.docsync-comment.outputs.is_docsync_pr }}
         run: |
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| PR Number | #${{ github.event.issue.number }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Refinement Success | ${REFINEMENT_SUCCESS:-false} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Changes Made | ${CHANGES_MADE:-false} |" >> $GITHUB_STEP_SUMMARY
+          echo "| PR Number | #${{ inputs.comment_pr_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Valid Comment | ${VALID:-false} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Is DocSync PR | ${IS_DOCSYNC_PR:-false} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Documentation Updated | ${UPDATED:-false} |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | $JOB_STATUS |" >> $GITHUB_STEP_SUMMARY
-
-          if [ -n "$SANITIZATION_WARNING" ]; then
-            echo "| Warning | $SANITIZATION_WARNING |" >> $GITHUB_STEP_SUMMARY
-          fi
