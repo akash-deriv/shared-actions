@@ -75,33 +75,46 @@ runs:
       run: |
         echo "## 🔍 Verifying DocSync PR" >> $GITHUB_STEP_SUMMARY
 
-        # Get PR labels
-        PR_LABELS=$(gh api \
+        # Get PR details including labels and title
+        PR_DATA=$(gh api \
           -H "Accept: application/vnd.github+json" \
-          "/repos/${{ inputs.repository }}/pulls/$PR_NUMBER" \
-          --jq '.labels[].name' 2>&1 || echo "")
+          "/repos/${{ inputs.repository }}/pulls/$PR_NUMBER")
 
-        echo "### PR Labels:" >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-        echo "$PR_LABELS" >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
+        # Extract labels
+        PR_LABELS=$(echo "$PR_DATA" | jq -r '.labels[].name' 2>&1 || echo "")
 
-        # Check if PR has docsync-ai or automated label
-        if echo "$PR_LABELS" | grep -i "docsync-ai\|automated" > /dev/null; then
+        # Extract PR title
+        PR_TITLE=$(echo "$PR_DATA" | jq -r '.title' 2>&1 || echo "")
+
+        # Extract PR branch
+        PR_BRANCH=$(echo "$PR_DATA" | jq -r '.head.ref' 2>&1)
+
+        echo "### PR Information:" >> $GITHUB_STEP_SUMMARY
+        echo "- **Title**: $PR_TITLE" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch**: $PR_BRANCH" >> $GITHUB_STEP_SUMMARY
+        echo "- **Labels**: ${PR_LABELS:-'(none)'}" >> $GITHUB_STEP_SUMMARY
+
+        # Check if PR has docsync-ai or automated label, OR if title contains "DocSync"
+        IS_DOCSYNC_PR=false
+
+        if echo "$PR_LABELS" | grep -qE "(docsync-ai|automated)"; then
+          IS_DOCSYNC_PR=true
+          echo "✅ PR has DocSync label" >> $GITHUB_STEP_SUMMARY
+        elif echo "$PR_TITLE" | grep -qi "docsync"; then
+          IS_DOCSYNC_PR=true
+          echo "✅ PR title contains 'DocSync'" >> $GITHUB_STEP_SUMMARY
+        fi
+
+        if [ "$IS_DOCSYNC_PR" = true ]; then
           echo "is_docsync_pr=true" >> $GITHUB_OUTPUT
-          echo "✅ PR is a DocSync PR" >> $GITHUB_STEP_SUMMARY
-
-          # Get PR branch name
-          PR_BRANCH=$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${{ inputs.repository }}/pulls/$PR_NUMBER" \
-            --jq '.head.ref' 2>&1)
-
           echo "pr_branch=$PR_BRANCH" >> $GITHUB_OUTPUT
-          echo "PR Branch: $PR_BRANCH" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Verified as DocSync PR**" >> $GITHUB_STEP_SUMMARY
         else
           echo "is_docsync_pr=false" >> $GITHUB_OUTPUT
-          echo "❌ PR is not a DocSync PR - skipping" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "❌ **Not a DocSync PR**" >> $GITHUB_STEP_SUMMARY
+          echo "This feature only works on DocSync PRs (with 'docsync-ai'/'automated' labels or 'DocSync' in title)" >> $GITHUB_STEP_SUMMARY
           exit 0
         fi
 
