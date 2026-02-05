@@ -1,0 +1,69 @@
+name: 📝 DocSync AI - Refinement
+
+on:
+  workflow_call:
+    secrets:
+      DOCSYNC_GITHUB_TOKEN:
+        description: 'GitHub PAT for PR operations (repo-specific, needs repo and pull_requests permissions)'
+        required: true
+      DOCSYNC_ANTHROPIC_API_KEY:
+        description: 'Anthropic API key for Claude AI'
+        required: true
+
+concurrency:
+  group: docsync-ai-refine-${{ github.repository }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  refine-documentation:
+    name: 📝 Refine Documentation
+    runs-on: ubuntu-latest
+
+    # Only run on PR comments that start with docsync:
+    if: |
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, 'docsync:')
+
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: 🔍 Debug - Comment Info
+        run: |
+          echo "## 🔍 Comment Trigger Info" >> $GITHUB_STEP_SUMMARY
+          echo "Event: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "Action: ${{ github.event.action }}" >> $GITHUB_STEP_SUMMARY
+          echo "Issue/PR Number: ${{ github.event.issue.number }}" >> $GITHUB_STEP_SUMMARY
+          echo "Comment ID: ${{ github.event.comment.id }}" >> $GITHUB_STEP_SUMMARY
+          echo "Comment Author: @${{ github.event.comment.user.login }}" >> $GITHUB_STEP_SUMMARY
+          echo "Repository: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: 🤖 Run DocSync AI Refinement Action
+        id: refine
+        uses: akash-deriv/shared-actions/.github/actions/docsync_ai_comment@master
+        with:
+          github_token: ${{ secrets.DOCSYNC_GITHUB_TOKEN }}
+          anthropic_api_key: ${{ secrets.DOCSYNC_ANTHROPIC_API_KEY }}
+          repository: ${{ github.repository }}
+          pr_number: ${{ github.event.issue.number }}
+          comment_body: ${{ github.event.comment.body }}
+
+      - name: ✅ Summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          UPDATED: ${{ steps.refine.outputs.updated }}
+          VALID: ${{ steps.refine.outputs.suggestion_valid }}
+          IS_DOCSYNC_PR: ${{ steps.refine.outputs.is_docsync_pr }}
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| PR Number | #${{ github.event.issue.number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Valid Comment | ${VALID:-false} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Is DocSync PR | ${IS_DOCSYNC_PR:-false} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Documentation Updated | ${UPDATED:-false} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | $JOB_STATUS |" >> $GITHUB_STEP_SUMMARY
