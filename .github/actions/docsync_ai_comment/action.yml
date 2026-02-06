@@ -141,97 +141,138 @@ runs:
         echo "## 🤖 Claude 3.7 Sonnet Analysis" >> $GITHUB_STEP_SUMMARY
         echo "Model: claude-3-7-sonnet-latest" >> $GITHUB_STEP_SUMMARY
 
-        # Determine which documentation file exists
-        DOC_FILE=""
+        # Check which documentation files exist
+        HAS_README=false
+        HAS_CLAUDE=false
+
         if [ -f "README.md" ]; then
-          DOC_FILE="README.md"
-          echo "Documentation file: README.md" >> $GITHUB_STEP_SUMMARY
-        elif [ -f "CLAUDE.md" ]; then
-          DOC_FILE="CLAUDE.md"
-          echo "Documentation file: CLAUDE.md" >> $GITHUB_STEP_SUMMARY
-        else
+          HAS_README=true
+          echo "✅ Found README.md" >> $GITHUB_STEP_SUMMARY
+        fi
+
+        if [ -f "CLAUDE.md" ]; then
+          HAS_CLAUDE=true
+          echo "✅ Found CLAUDE.md" >> $GITHUB_STEP_SUMMARY
+        fi
+
+        if [ "$HAS_README" = false ] && [ "$HAS_CLAUDE" = false ]; then
           echo "❌ No documentation file found (README.md or CLAUDE.md)" >> $GITHUB_STEP_SUMMARY
           echo "skip_analysis=true" >> $GITHUB_OUTPUT
           exit 0
         fi
 
-        # Read current documentation
-        DOC_CONTENT=$(cat "$DOC_FILE")
+        ANY_UPDATES=false
 
-        # Prepare the prompt
-        cat > /tmp/claude_prompt.txt << 'PROMPT_EOF'
+        # Function to call Claude API for documentation update
+        update_doc_file() {
+          local DOC_FILE=$1
+          local DOC_FORMAT=$2
+
+          echo "Processing $DOC_FILE..." >> $GITHUB_STEP_SUMMARY
+
+          # Read current documentation
+          DOC_CONTENT=$(cat "$DOC_FILE")
+
+          # Prepare the prompt based on file type
+          if [ "$DOC_FORMAT" = "README" ]; then
+            FORMAT_INSTRUCTION="This is a README.md file. Maintain standard README format with clear sections, proper markdown formatting, badges, installation instructions, usage examples, and project overview. Keep the professional, user-facing documentation style."
+            PROMPT_FILE="/tmp/claude_prompt_readme.txt"
+          else
+            FORMAT_INSTRUCTION="This is a CLAUDE.md file for AI assistance. Maintain the technical, detailed format suitable for AI context with implementation details, architecture notes, and development guidelines. Keep the detailed, technical documentation style."
+            PROMPT_FILE="/tmp/claude_prompt_claude.txt"
+          fi
+
+          # Prepare the prompt
+          cat > "$PROMPT_FILE" << 'PROMPT_EOF'
         You are a technical documentation expert. A user has provided a suggestion for improving the documentation in a DocSync PR.
 
         # Context
         Repository: ${REPO_NAME}
         PR #${PR_NUMBER} (DocSync Documentation PR)
 
-        # Current Documentation File: ${DOC_FILE}
+        # Current ${DOC_FILE}:
         ${DOC_CONTENT}
 
         # User Suggestion:
         ${USER_SUGGESTION}
 
+        # Format Requirements:
+        ${FORMAT_INSTRUCTION}
+
         # Your Task
-        Apply the user's suggestion to update the documentation appropriately.
+        Apply the user's suggestion to update the ${DOC_FILE}.
 
-        ## Rules (CRITICAL - MUST FOLLOW):
-        1. **Only update existing files**: Update the documentation file provided above. DO NOT create new files.
-        2. **Follow user intent**: Carefully interpret and apply the user's suggestion. If the suggestion is vague, make reasonable improvements.
-        3. **Partial updates only**: Only modify sections relevant to the suggestion. Keep all other content unchanged.
-        4. **No other file modifications**: Do not touch any files except the documentation file.
-        5. **Quality standards**: Ensure updates are accurate, clear, and improve documentation quality.
+        ## CRITICAL RULES - MUST FOLLOW:
+        1. **Direct output only**: Output ONLY the updated documentation content. NO acknowledgments like "I will apply", "I understand", "Here's the updated", or any explanatory text.
+        2. **Maintain format**: Keep the exact same documentation style and structure as the current file.
+        3. **Follow user intent**: Carefully interpret and apply the user's suggestion. If the suggestion is vague, make reasonable improvements.
+        4. **Update relevant sections**: Only modify sections relevant to the suggestion. Keep everything else exactly as is.
+        5. **Complete file output**: Provide the COMPLETE updated file content, not just the changed sections.
+        6. **No meta-commentary**: No phrases like "I've updated", "Changes made", or section summaries.
+        7. **Quality standards**: Ensure updates are accurate, clear, and improve documentation quality.
 
-        ## Analysis Steps:
-        1. Review the current documentation
-        2. Understand the user's suggestion and intent
-        3. Identify which sections need updates
-        4. Apply the changes while maintaining documentation quality and consistency
-        5. Output the COMPLETE updated documentation
-
-        ## Output Format:
-        Output ONLY the complete updated documentation content, nothing else.
-
-        Do not include any explanations, markdown code blocks, or extra text. Just the raw documentation content.
+        Start your response immediately with the complete updated ${DOC_FILE} content. Nothing else.
         PROMPT_EOF
 
-        # Expand variables in prompt
-        FULL_PROMPT=$(eval "cat <<PROMPT_EVAL
-        $(cat /tmp/claude_prompt.txt)
+          # Expand variables in prompt
+          FULL_PROMPT=$(eval "cat <<PROMPT_EVAL
+        $(cat $PROMPT_FILE)
         PROMPT_EVAL
         ")
 
-        # Call Claude API
-        echo "Calling Claude 3.7 Sonnet API..." >> $GITHUB_STEP_SUMMARY
+          # Call Claude API
+          echo "  Calling Claude API for $DOC_FILE..." >> $GITHUB_STEP_SUMMARY
 
-        RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-          -H "content-type: application/json" \
-          -H "x-api-key: $ANTHROPIC_API_KEY" \
-          -H "anthropic-version: 2023-06-01" \
-          -d "{
-            \"model\": \"claude-3-7-sonnet-latest\",
-            \"max_tokens\": 8192,
-            \"messages\": [{
-              \"role\": \"user\",
-              \"content\": $(echo "$FULL_PROMPT" | jq -Rs .)
-            }]
-          }")
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "content-type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "{
+              \"model\": \"claude-3-7-sonnet-latest\",
+              \"max_tokens\": 8192,
+              \"messages\": [{
+                \"role\": \"user\",
+                \"content\": $(echo "$FULL_PROMPT" | jq -Rs .)
+              }]
+            }")
 
-        # Check for API errors
-        if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
-          ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message')
-          echo "❌ Claude API Error: $ERROR_MSG" >> $GITHUB_STEP_SUMMARY
-          echo "skip_analysis=true" >> $GITHUB_OUTPUT
-          exit 1
+          # Check for API errors
+          if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
+            ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message')
+            echo "  ❌ Claude API Error for $DOC_FILE: $ERROR_MSG" >> $GITHUB_STEP_SUMMARY
+            return 1
+          fi
+
+          # Extract the response content
+          CLAUDE_OUTPUT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+
+          echo "  ✅ Updating $DOC_FILE" >> $GITHUB_STEP_SUMMARY
+          # Write the updated documentation
+          echo "$CLAUDE_OUTPUT" > "$DOC_FILE"
+          ANY_UPDATES=true
+          return 0
+        }
+
+        # Update README.md if it exists
+        if [ "$HAS_README" = true ]; then
+          update_doc_file "README.md" "README" || echo "  ⚠️ Failed to update README.md" >> $GITHUB_STEP_SUMMARY
         fi
 
-        # Extract the response content
-        CLAUDE_OUTPUT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+        # Update CLAUDE.md if it exists
+        if [ "$HAS_CLAUDE" = true ]; then
+          update_doc_file "CLAUDE.md" "CLAUDE" || echo "  ⚠️ Failed to update CLAUDE.md" >> $GITHUB_STEP_SUMMARY
+        fi
 
-        echo "📝 Claude provided documentation updates" >> $GITHUB_STEP_SUMMARY
-        # Write the updated documentation
-        echo "$CLAUDE_OUTPUT" > "$DOC_FILE"
-        echo "skip_analysis=false" >> $GITHUB_OUTPUT
+        # Set final output
+        if [ "$ANY_UPDATES" = true ]; then
+          echo "skip_analysis=false" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📝 Documentation files have been updated" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "skip_analysis=true" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ No documentation updates were applied" >> $GITHUB_STEP_SUMMARY
+        fi
 
     - name: 💾 Commit Changes to PR
       id: commit-changes

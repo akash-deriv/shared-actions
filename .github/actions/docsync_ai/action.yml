@@ -117,39 +117,63 @@ runs:
         echo "## 🤖 Claude 3.7 Sonnet Analysis" >> $GITHUB_STEP_SUMMARY
         echo "Model: claude-3-7-sonnet-latest" >> $GITHUB_STEP_SUMMARY
 
-        # Determine which documentation file exists
-        DOC_FILE=""
+        # Check which documentation files exist
+        HAS_README=false
+        HAS_CLAUDE=false
+
         if [ -f "README.md" ]; then
-          DOC_FILE="README.md"
-          echo "Documentation file: README.md" >> $GITHUB_STEP_SUMMARY
-        elif [ -f "CLAUDE.md" ]; then
-          DOC_FILE="CLAUDE.md"
-          echo "Documentation file: CLAUDE.md" >> $GITHUB_STEP_SUMMARY
-        else
+          HAS_README=true
+          echo "✅ Found README.md" >> $GITHUB_STEP_SUMMARY
+        fi
+
+        if [ -f "CLAUDE.md" ]; then
+          HAS_CLAUDE=true
+          echo "✅ Found CLAUDE.md" >> $GITHUB_STEP_SUMMARY
+        fi
+
+        if [ "$HAS_README" = false ] && [ "$HAS_CLAUDE" = false ]; then
           echo "❌ No documentation file found (README.md or CLAUDE.md)" >> $GITHUB_STEP_SUMMARY
           echo "skip_analysis=true" >> $GITHUB_OUTPUT
           exit 0
         fi
 
-        # Read current documentation
-        DOC_CONTENT=$(cat "$DOC_FILE")
-
         # Read PR diff
         PR_DIFF=$(cat /tmp/pr_diff.txt || echo "No diff available")
 
         # Get repository structure
-        REPO_STRUCTURE=$(find . -type f -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -o -name "*.py" -o -name "*.go" -o -name "*.java" | grep -v node_modules | grep -v ".git" | head -50 || echo "")
+        REPO_STRUCTURE=$(find . -type f -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -o -name "*.py" -o -name "*.go" -o -name "*.java" -o -name "*.yml" -o -name "*.yaml" | grep -v node_modules | grep -v ".git" | head -50 || echo "")
 
-        # Prepare the prompt
-        cat > /tmp/claude_prompt.txt << 'PROMPT_EOF'
-        You are a technical documentation expert. Analyze the PR changes and determine if documentation needs updates.
+        ANY_UPDATES=false
+
+        # Function to call Claude API for documentation update
+        update_doc_file() {
+          local DOC_FILE=$1
+          local DOC_FORMAT=$2
+
+          echo "Processing $DOC_FILE..." >> $GITHUB_STEP_SUMMARY
+
+          # Read current documentation
+          DOC_CONTENT=$(cat "$DOC_FILE")
+
+          # Prepare the prompt based on file type
+          if [ "$DOC_FORMAT" = "README" ]; then
+            FORMAT_INSTRUCTION="This is a README.md file. Maintain standard README format with clear sections, proper markdown formatting, badges, installation instructions, usage examples, and project overview. Keep the professional, user-facing documentation style."
+            PROMPT_FILE="/tmp/claude_prompt_readme.txt"
+          else
+            FORMAT_INSTRUCTION="This is a CLAUDE.md file for AI assistance. Maintain the technical, detailed format suitable for AI context with implementation details, architecture notes, and development guidelines. Keep the detailed, technical documentation style."
+            PROMPT_FILE="/tmp/claude_prompt_claude.txt"
+          fi
+
+          # Prepare the prompt
+          cat > "$PROMPT_FILE" << 'PROMPT_EOF'
+        You are a technical documentation expert. Analyze the PR changes and update the documentation if needed.
 
         # Context
         Repository: ${REPO_NAME}
         PR #${PR_NUMBER}: ${PR_TITLE}
         PR Description: ${PR_BODY}
 
-        # Current Documentation File: ${DOC_FILE}
+        # Current ${DOC_FILE}:
         ${DOC_CONTENT}
 
         # PR Changes (Diff):
@@ -158,72 +182,91 @@ runs:
         # Repository Structure (sample):
         ${REPO_STRUCTURE}
 
+        # Format Requirements:
+        ${FORMAT_INSTRUCTION}
+
         # Your Task
-        Analyze the PR changes and determine if the documentation needs to be updated.
+        Update the ${DOC_FILE} based on the PR changes.
 
-        ## Rules (CRITICAL - MUST FOLLOW):
-        1. **Only update existing files**: Update the documentation file provided above. DO NOT create new files.
-        2. **Partial updates only**: Only modify sections relevant to the changes. Keep all other content unchanged.
-        3. **Significance check**: Only update if changes are significant (new features, major fixes, API changes). Skip minor changes (typos, formatting, small refactors).
-        4. **No other file modifications**: Do not touch any files except the documentation file.
-        5. **No additional suggestions**: Do not suggest other improvements or changes.
+        ## CRITICAL RULES - MUST FOLLOW:
+        1. **Direct output only**: Output ONLY the updated documentation content. NO acknowledgments like "I will analyze", "I understand", "Here's the updated", or any explanatory text.
+        2. **Maintain format**: Keep the exact same documentation style and structure as the current file.
+        3. **Update relevant sections**: Only modify sections that relate to the PR changes. Keep everything else exactly as is.
+        4. **Significance check**: Only update if changes are significant (new features, major fixes, API changes, workflow updates). Skip minor changes (typos, formatting tweaks, small refactors).
+        5. **Complete file output**: Provide the COMPLETE updated file content, not just the changed sections.
+        6. **No meta-commentary**: No phrases like "I've updated", "Changes made", or section summaries.
 
-        ## Analysis Steps:
-        1. Analyze the PR diff to understand what changed
-        2. Review the current documentation
-        3. Determine if the changes warrant documentation updates based on significance
-        4. If significant: Identify which sections need updates and provide the COMPLETE updated documentation
-        5. If not significant: Respond with "NO_UPDATES_NEEDED"
+        ## Decision:
+        - If significant updates are needed: Output the COMPLETE updated ${DOC_FILE} content immediately, with no preamble
+        - If no significant updates needed: Output exactly: NO_UPDATES_NEEDED
 
-        ## Output Format:
-        If updates are needed, output ONLY the complete updated documentation content, nothing else.
-        If no updates are needed, output exactly: NO_UPDATES_NEEDED
-
-        Do not include any explanations, markdown code blocks, or extra text. Just the raw documentation content or "NO_UPDATES_NEEDED".
+        Start your response immediately with either the updated documentation content or "NO_UPDATES_NEEDED". Nothing else.
         PROMPT_EOF
 
-        # Expand variables in prompt
-        FULL_PROMPT=$(eval "cat <<PROMPT_EVAL
-        $(cat /tmp/claude_prompt.txt)
+          # Expand variables in prompt
+          FULL_PROMPT=$(eval "cat <<PROMPT_EVAL
+        $(cat $PROMPT_FILE)
         PROMPT_EVAL
         ")
 
-        # Call Claude API
-        echo "Calling Claude 3.7 Sonnet API..." >> $GITHUB_STEP_SUMMARY
+          # Call Claude API
+          echo "  Calling Claude API for $DOC_FILE..." >> $GITHUB_STEP_SUMMARY
 
-        RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-          -H "content-type: application/json" \
-          -H "x-api-key: $ANTHROPIC_API_KEY" \
-          -H "anthropic-version: 2023-06-01" \
-          -d "{
-            \"model\": \"claude-3-7-sonnet-latest\",
-            \"max_tokens\": 8192,
-            \"messages\": [{
-              \"role\": \"user\",
-              \"content\": $(echo "$FULL_PROMPT" | jq -Rs .)
-            }]
-          }")
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "content-type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "{
+              \"model\": \"claude-3-7-sonnet-latest\",
+              \"max_tokens\": 8192,
+              \"messages\": [{
+                \"role\": \"user\",
+                \"content\": $(echo "$FULL_PROMPT" | jq -Rs .)
+              }]
+            }")
 
-        # Check for API errors
-        if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
-          ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message')
-          echo "❌ Claude API Error: $ERROR_MSG" >> $GITHUB_STEP_SUMMARY
-          echo "skip_analysis=true" >> $GITHUB_OUTPUT
-          exit 1
+          # Check for API errors
+          if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
+            ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message')
+            echo "  ❌ Claude API Error for $DOC_FILE: $ERROR_MSG" >> $GITHUB_STEP_SUMMARY
+            return 1
+          fi
+
+          # Extract the response content
+          CLAUDE_OUTPUT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+
+          # Check if updates are needed
+          if echo "$CLAUDE_OUTPUT" | grep -q "NO_UPDATES_NEEDED"; then
+            echo "  ℹ️ No updates needed for $DOC_FILE" >> $GITHUB_STEP_SUMMARY
+            return 0
+          else
+            echo "  ✅ Updating $DOC_FILE" >> $GITHUB_STEP_SUMMARY
+            # Write the updated documentation
+            echo "$CLAUDE_OUTPUT" > "$DOC_FILE"
+            ANY_UPDATES=true
+            return 0
+          fi
+        }
+
+        # Update README.md if it exists
+        if [ "$HAS_README" = true ]; then
+          update_doc_file "README.md" "README" || echo "  ⚠️ Failed to update README.md" >> $GITHUB_STEP_SUMMARY
         fi
 
-        # Extract the response content
-        CLAUDE_OUTPUT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+        # Update CLAUDE.md if it exists
+        if [ "$HAS_CLAUDE" = true ]; then
+          update_doc_file "CLAUDE.md" "CLAUDE" || echo "  ⚠️ Failed to update CLAUDE.md" >> $GITHUB_STEP_SUMMARY
+        fi
 
-        # Check if updates are needed
-        if echo "$CLAUDE_OUTPUT" | grep -q "NO_UPDATES_NEEDED"; then
-          echo "✅ Claude determined no documentation updates needed" >> $GITHUB_STEP_SUMMARY
-          echo "skip_analysis=true" >> $GITHUB_OUTPUT
-        else
-          echo "📝 Claude provided documentation updates" >> $GITHUB_STEP_SUMMARY
-          # Write the updated documentation
-          echo "$CLAUDE_OUTPUT" > "$DOC_FILE"
+        # Set final output
+        if [ "$ANY_UPDATES" = true ]; then
           echo "skip_analysis=false" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📝 Documentation files have been updated" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "skip_analysis=true" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ No documentation updates needed" >> $GITHUB_STEP_SUMMARY
         fi
 
     - name: 🔍 Check for Documentation Changes
