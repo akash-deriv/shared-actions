@@ -117,19 +117,23 @@ runs:
         echo "## 🤖 Claude 3.7 Sonnet Analysis" >> $GITHUB_STEP_SUMMARY
         echo "Model: claude-3-7-sonnet-latest" >> $GITHUB_STEP_SUMMARY
 
-        # Check which documentation files exist
+        # === PHASE 1: DETECT ALL DOCUMENTATION FILES ===
+        # Check for BOTH files before updating anything
         HAS_README=false
         HAS_CLAUDE=false
 
         if [ -f "README.md" ]; then
           HAS_README=true
-          echo "✅ Found README.md" >> $GITHUB_STEP_SUMMARY
         fi
 
         if [ -f "CLAUDE.md" ]; then
           HAS_CLAUDE=true
-          echo "✅ Found CLAUDE.md" >> $GITHUB_STEP_SUMMARY
         fi
+
+        # Log detection results for both files
+        echo "### 📄 Documentation File Detection:" >> $GITHUB_STEP_SUMMARY
+        echo "- README.md: $([ "$HAS_README" = true ] && echo '✅ Found' || echo '❌ Not found')" >> $GITHUB_STEP_SUMMARY
+        echo "- CLAUDE.md: $([ "$HAS_CLAUDE" = true ] && echo '✅ Found' || echo '❌ Not found')" >> $GITHUB_STEP_SUMMARY
 
         if [ "$HAS_README" = false ] && [ "$HAS_CLAUDE" = false ]; then
           echo "❌ No documentation file found (README.md or CLAUDE.md)" >> $GITHUB_STEP_SUMMARY
@@ -149,6 +153,7 @@ runs:
         update_doc_file() {
           local DOC_FILE=$1
           local DOC_FORMAT=$2
+          local OTHER_FILES_NOTE=$3
 
           echo "Processing $DOC_FILE..." >> $GITHUB_STEP_SUMMARY
 
@@ -184,6 +189,9 @@ runs:
 
         # Format Requirements:
         ${FORMAT_INSTRUCTION}
+
+        # Documentation Context:
+        ${OTHER_FILES_NOTE}
 
         # Your Task
         Update the ${DOC_FILE} based on the PR changes.
@@ -248,14 +256,20 @@ runs:
           fi
         }
 
-        # Update README.md if it exists
-        if [ "$HAS_README" = true ]; then
-          update_doc_file "README.md" "README" || echo "  ⚠️ Failed to update README.md" >> $GITHUB_STEP_SUMMARY
-        fi
+        # === PHASE 2: UPDATE ALL DETECTED DOCUMENTATION FILES ===
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📝 Updating Documentation Files:" >> $GITHUB_STEP_SUMMARY
 
-        # Update CLAUDE.md if it exists
-        if [ "$HAS_CLAUDE" = true ]; then
-          update_doc_file "CLAUDE.md" "CLAUDE" || echo "  ⚠️ Failed to update CLAUDE.md" >> $GITHUB_STEP_SUMMARY
+        if [ "$HAS_README" = true ] && [ "$HAS_CLAUDE" = true ]; then
+          echo "Both README.md and CLAUDE.md detected — updating both" >> $GITHUB_STEP_SUMMARY
+          update_doc_file "README.md" "README" "CLAUDE.md also exists in this repository and is being updated separately for AI/Claude Code context. Focus this README.md update on user-facing documentation only." || echo "  ⚠️ Failed to update README.md" >> $GITHUB_STEP_SUMMARY
+          update_doc_file "CLAUDE.md" "CLAUDE" "README.md also exists in this repository and is being updated separately for user-facing documentation. Focus this CLAUDE.md update on AI/Claude Code technical context only." || echo "  ⚠️ Failed to update CLAUDE.md" >> $GITHUB_STEP_SUMMARY
+        elif [ "$HAS_README" = true ]; then
+          echo "Only README.md detected — updating README.md" >> $GITHUB_STEP_SUMMARY
+          update_doc_file "README.md" "README" "This is the only documentation file in the repository." || echo "  ⚠️ Failed to update README.md" >> $GITHUB_STEP_SUMMARY
+        elif [ "$HAS_CLAUDE" = true ]; then
+          echo "Only CLAUDE.md detected — updating CLAUDE.md" >> $GITHUB_STEP_SUMMARY
+          update_doc_file "CLAUDE.md" "CLAUDE" "This is the only documentation file in the repository." || echo "  ⚠️ Failed to update CLAUDE.md" >> $GITHUB_STEP_SUMMARY
         fi
 
         # Set final output
