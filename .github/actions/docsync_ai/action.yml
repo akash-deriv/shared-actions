@@ -59,13 +59,9 @@ runs:
         echo "Current branch: $(git branch --show-current)" >> $GITHUB_STEP_SUMMARY
         echo "Latest commit: $(git log -1 --oneline)" >> $GITHUB_STEP_SUMMARY
 
-        # Check for existing documentation files
-        if [ -f "README.md" ]; then
-          echo "✅ Found README.md" >> $GITHUB_STEP_SUMMARY
-        fi
-        if [ -f "CLAUDE.md" ]; then
-          echo "✅ Found CLAUDE.md" >> $GITHUB_STEP_SUMMARY
-        fi
+        # Check for existing documentation files (case-insensitive)
+        find . -maxdepth 1 -iname "readme.md" | while read f; do echo "✅ Found ${f#./}" >> $GITHUB_STEP_SUMMARY; done
+        find . -maxdepth 1 -iname "claude.md" | while read f; do echo "✅ Found ${f#./}" >> $GITHUB_STEP_SUMMARY; done
 
     - name: 📋 Fetch Merged PR Details
       id: pr-details
@@ -122,18 +118,24 @@ runs:
         HAS_README=false
         HAS_CLAUDE=false
 
-        if [ -f "README.md" ]; then
+        # Case-insensitive check for README.md
+        README_FILE=$(find . -maxdepth 1 -iname "readme.md" -print -quit 2>/dev/null)
+        if [ -n "$README_FILE" ]; then
           HAS_README=true
+          README_FILE="${README_FILE#./}"
         fi
 
-        if [ -f "CLAUDE.md" ]; then
+        # Case-insensitive check for CLAUDE.md
+        CLAUDE_FILE=$(find . -maxdepth 1 -iname "claude.md" -print -quit 2>/dev/null)
+        if [ -n "$CLAUDE_FILE" ]; then
           HAS_CLAUDE=true
+          CLAUDE_FILE="${CLAUDE_FILE#./}"
         fi
 
         # Log detection results for both files
         echo "### 📄 Documentation File Detection:" >> $GITHUB_STEP_SUMMARY
-        echo "- README.md: $([ "$HAS_README" = true ] && echo '✅ Found' || echo '❌ Not found')" >> $GITHUB_STEP_SUMMARY
-        echo "- CLAUDE.md: $([ "$HAS_CLAUDE" = true ] && echo '✅ Found' || echo '❌ Not found')" >> $GITHUB_STEP_SUMMARY
+        echo "- README.md: $([ "$HAS_README" = true ] && echo "✅ Found ($README_FILE)" || echo '❌ Not found')" >> $GITHUB_STEP_SUMMARY
+        echo "- CLAUDE.md: $([ "$HAS_CLAUDE" = true ] && echo "✅ Found ($CLAUDE_FILE)" || echo '❌ Not found')" >> $GITHUB_STEP_SUMMARY
 
         if [ "$HAS_README" = false ] && [ "$HAS_CLAUDE" = false ]; then
           echo "❌ No documentation file found (README.md or CLAUDE.md)" >> $GITHUB_STEP_SUMMARY
@@ -261,15 +263,15 @@ runs:
         echo "### 📝 Updating Documentation Files:" >> $GITHUB_STEP_SUMMARY
 
         if [ "$HAS_README" = true ] && [ "$HAS_CLAUDE" = true ]; then
-          echo "Both README.md and CLAUDE.md detected — updating both" >> $GITHUB_STEP_SUMMARY
-          update_doc_file "README.md" "README" "CLAUDE.md also exists in this repository and is being updated separately for AI/Claude Code context. Focus this README.md update on user-facing documentation only." || echo "  ⚠️ Failed to update README.md" >> $GITHUB_STEP_SUMMARY
-          update_doc_file "CLAUDE.md" "CLAUDE" "README.md also exists in this repository and is being updated separately for user-facing documentation. Focus this CLAUDE.md update on AI/Claude Code technical context only." || echo "  ⚠️ Failed to update CLAUDE.md" >> $GITHUB_STEP_SUMMARY
+          echo "Both $README_FILE and $CLAUDE_FILE detected — updating both" >> $GITHUB_STEP_SUMMARY
+          update_doc_file "$README_FILE" "README" "$CLAUDE_FILE also exists in this repository and is being updated separately for AI/Claude Code context. Focus this $README_FILE update on user-facing documentation only." || echo "  ⚠️ Failed to update $README_FILE" >> $GITHUB_STEP_SUMMARY
+          update_doc_file "$CLAUDE_FILE" "CLAUDE" "$README_FILE also exists in this repository and is being updated separately for user-facing documentation. Focus this $CLAUDE_FILE update on AI/Claude Code technical context only." || echo "  ⚠️ Failed to update $CLAUDE_FILE" >> $GITHUB_STEP_SUMMARY
         elif [ "$HAS_README" = true ]; then
-          echo "Only README.md detected — updating README.md" >> $GITHUB_STEP_SUMMARY
-          update_doc_file "README.md" "README" "This is the only documentation file in the repository." || echo "  ⚠️ Failed to update README.md" >> $GITHUB_STEP_SUMMARY
+          echo "Only $README_FILE detected — updating $README_FILE" >> $GITHUB_STEP_SUMMARY
+          update_doc_file "$README_FILE" "README" "This is the only documentation file in the repository." || echo "  ⚠️ Failed to update $README_FILE" >> $GITHUB_STEP_SUMMARY
         elif [ "$HAS_CLAUDE" = true ]; then
-          echo "Only CLAUDE.md detected — updating CLAUDE.md" >> $GITHUB_STEP_SUMMARY
-          update_doc_file "CLAUDE.md" "CLAUDE" "This is the only documentation file in the repository." || echo "  ⚠️ Failed to update CLAUDE.md" >> $GITHUB_STEP_SUMMARY
+          echo "Only $CLAUDE_FILE detected — updating $CLAUDE_FILE" >> $GITHUB_STEP_SUMMARY
+          update_doc_file "$CLAUDE_FILE" "CLAUDE" "This is the only documentation file in the repository." || echo "  ⚠️ Failed to update $CLAUDE_FILE" >> $GITHUB_STEP_SUMMARY
         fi
 
         # Set final output
@@ -309,14 +311,15 @@ runs:
           INVALID_FILES=""
 
           for file in $CHANGED; do
-            if [[ "$file" != "README.md" ]] && [[ "$file" != "CLAUDE.md" ]]; then
+            FILE_LOWER=$(echo "$file" | tr '[:upper:]' '[:lower:]')
+            if [[ "$FILE_LOWER" != "readme.md" ]] && [[ "$FILE_LOWER" != "claude.md" ]]; then
               INVALID_FILES="$INVALID_FILES $file"
             fi
           done
 
           if [ -n "$INVALID_FILES" ]; then
             echo "❌ ERROR: Non-documentation files were modified:$INVALID_FILES" >> $GITHUB_STEP_SUMMARY
-            echo "Only README.md and CLAUDE.md should be updated." >> $GITHUB_STEP_SUMMARY
+            echo "Only README.md and CLAUDE.md (any casing) should be updated." >> $GITHUB_STEP_SUMMARY
             git reset --hard
             echo "has_changes=false" >> $GITHUB_OUTPUT
             exit 1
@@ -368,8 +371,8 @@ runs:
         BRANCH="docs/auto-update-$(date +%Y%m%d-%H%M%S)"
         git checkout -b "$BRANCH"
 
-        # Add only documentation files
-        git add README.md CLAUDE.md 2>/dev/null || true
+        # Add only documentation files (case-insensitive match)
+        find . -maxdepth 1 -iname "readme.md" -o -iname "claude.md" | xargs git add 2>/dev/null || true
 
         git commit -m "📚 DocSync AI: Update documentation for PR #$MERGED_PR_NUMBER
 
