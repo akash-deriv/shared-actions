@@ -115,52 +115,84 @@ jobs:
           MERGED_PR_NUMBER: ${{ github.event.pull_request.number }}
           MERGED_PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
+          set -e
+
+          # Validate webhook URL format
+          if [[ ! "$SLACK_WEBHOOK" =~ ^https://hooks\.slack\.com/services/ ]]; then
+            echo "⚠️ Warning: Invalid Slack webhook URL format, skipping notification" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # Sanitize inputs for Slack message
+          MERGED_PR_TITLE_CLEAN=$(echo "$MERGED_PR_TITLE" | tr -d '\000-\037' | head -c 200)
+          DOC_PR_URL_CLEAN=$(echo "$DOC_PR_URL" | head -c 500)
+
+          # Validate PR numbers
+          if ! [[ "$DOC_PR_NUMBER" =~ ^[0-9]+$ ]] || ! [[ "$MERGED_PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "⚠️ Warning: Invalid PR numbers, skipping notification" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
           # Format repository owner mention for Slack
           OWNER_MENTION=""
           if [ -n "$REPO_OWNER" ]; then
-            OWNER_MENTION="<@$REPO_OWNER> "
+            # Sanitize owner mention
+            REPO_OWNER_CLEAN=$(echo "$REPO_OWNER" | tr -d '\000-\037' | head -c 50)
+            OWNER_MENTION="<@$REPO_OWNER_CLEAN> "
           fi
 
-          # Send Slack notification
-          curl -X POST "$SLACK_WEBHOOK" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg owner "$OWNER_MENTION" \
-              --arg repo "${{ github.repository }}" \
-              --arg doc_pr_url "$DOC_PR_URL" \
-              --arg doc_pr_num "$DOC_PR_NUMBER" \
-              --arg merged_pr_num "$MERGED_PR_NUMBER" \
-              --arg merged_pr_title "$MERGED_PR_TITLE" \
-              '{
-                "blocks": [
-                  {
-                    "type": "section",
-                    "text": {
-                      "type": "mrkdwn",
-                      "text": "\($owner):book: *Documentation Update Ready*\n*<\($doc_pr_url)|PR #\($doc_pr_num)>* in `\($repo)`"
-                    }
-                  },
-                  {
-                    "type": "section",
-                    "text": {
-                      "type": "mrkdwn",
-                      "text": "Documentation has been automatically updated based on:\n- *PR #\($merged_pr_num)*: \($merged_pr_title)"
-                    }
-                  },
-                  {
-                    "type": "context",
-                    "elements": [
-                      {
-                        "type": "mrkdwn",
-                        "text": "🤖 DocSync AI | <\($doc_pr_url)|Review documentation updates>"
-                      }
-                    ]
+          # Create Slack payload safely using jq
+          SLACK_PAYLOAD=$(jq -n \
+            --arg owner "$OWNER_MENTION" \
+            --arg repo "${{ github.repository }}" \
+            --arg doc_pr_url "$DOC_PR_URL_CLEAN" \
+            --arg doc_pr_num "$DOC_PR_NUMBER" \
+            --arg merged_pr_num "$MERGED_PR_NUMBER" \
+            --arg merged_pr_title "$MERGED_PR_TITLE_CLEAN" \
+            '{
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "\($owner):book: *Documentation Update Ready*\n*<\($doc_pr_url)|PR #\($doc_pr_num)>* in `\($repo)`"
                   }
-                ]
-              }'
-            )"
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "Documentation has been automatically updated based on:\n- *PR #\($merged_pr_num)*: \($merged_pr_title)"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "🤖 DocSync AI | <\($doc_pr_url)|Review documentation updates>"
+                    }
+                  ]
+                }
+              ]
+            }')
 
-          echo "📢 Slack notification sent to repository owner" >> $GITHUB_STEP_SUMMARY
+          # Create temporary file for response
+          TEMP_RESPONSE=$(mktemp)
+          trap "rm -f '$TEMP_RESPONSE'" EXIT
+
+          # Send Slack notification with error handling
+          HTTP_CODE=$(curl -s -w "%{http_code}" -o "$TEMP_RESPONSE" \
+            -X POST "$SLACK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$SLACK_PAYLOAD")
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "📢 Slack notification sent successfully" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Warning: Failed to send Slack notification (HTTP $HTTP_CODE)" >> $GITHUB_STEP_SUMMARY
+            # Don't fail the workflow on notification failure
+          fi
 
       - name: ✅ Summary
         if: always()

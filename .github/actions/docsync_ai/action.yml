@@ -69,28 +69,66 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github_token }}
         PR_NUMBER: ${{ inputs.pr_number }}
+        REPO_NAME: ${{ inputs.repository }}
       run: |
-        echo "## 📋 Merged PR Details" >> $GITHUB_STEP_SUMMARY
-        echo "Repository: ${{ inputs.repository }}" >> $GITHUB_STEP_SUMMARY
-        echo "PR #$PR_NUMBER: ${{ inputs.pr_title }}" >> $GITHUB_STEP_SUMMARY
+        set -e
 
-        # Get PR diff and files changed
+        # Validate PR number (numeric, reasonable range)
+        if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+          echo "❌ Invalid PR number: $PR_NUMBER" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+
+        if [ "$PR_NUMBER" -lt 1 ] || [ "$PR_NUMBER" -gt 999999 ]; then
+          echo "❌ PR number out of valid range: $PR_NUMBER" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+
+        # Validate repository format (owner/repo)
+        if ! [[ "$REPO_NAME" =~ ^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$ ]]; then
+          echo "❌ Invalid repository format: $REPO_NAME" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+
+        if [ ${#REPO_NAME} -gt 100 ]; then
+          echo "❌ Repository name too long" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+
+        echo "## 📋 Merged PR Details" >> $GITHUB_STEP_SUMMARY
+        echo "Repository: $REPO_NAME" >> $GITHUB_STEP_SUMMARY
+        echo "PR #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
+
+        # Create secure temporary directory
+        TEMP_DIR=$(mktemp -d -t docsync-XXXXXXXXXX)
+        echo "temp_dir=$TEMP_DIR" >> $GITHUB_OUTPUT
+
+        # Get PR diff and files changed with size limit
+        MAX_DIFF_SIZE=1048576  # 1MB
         PR_DIFF=$(gh api \
           -H "Accept: application/vnd.github.v3.diff" \
-          "/repos/${{ inputs.repository }}/pulls/$PR_NUMBER" 2>&1)
+          "/repos/$REPO_NAME/pulls/$PR_NUMBER" 2>&1 | head -c $MAX_DIFF_SIZE)
 
-        # Save PR diff to file for Claude analysis
-        echo "$PR_DIFF" > /tmp/pr_diff.txt
+        # Sanitize and validate diff content
+        PR_DIFF=$(echo "$PR_DIFF" | tr -d '\000' | iconv -c -t UTF-8//IGNORE)
+
+        # Save PR diff to secure temp file
+        PR_DIFF_FILE="$TEMP_DIR/pr_diff.txt"
+        echo "$PR_DIFF" > "$PR_DIFF_FILE"
+        chmod 600 "$PR_DIFF_FILE"
 
         # Get list of changed files
         CHANGED_FILES=$(gh api \
           -H "Accept: application/vnd.github+json" \
-          "/repos/${{ inputs.repository }}/pulls/$PR_NUMBER/files" \
+          "/repos/$REPO_NAME/pulls/$PR_NUMBER/files" \
           --jq '.[].filename' 2>&1 || echo "")
+
+        # Sanitize changed files list (truncate for summary)
+        CHANGED_FILES_SUMMARY=$(echo "$CHANGED_FILES" | head -n 50)
 
         echo "### Changed Files:" >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
-        echo "$CHANGED_FILES" >> $GITHUB_STEP_SUMMARY
+        echo "$CHANGED_FILES_SUMMARY" >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
 
         echo "changed_files<<EOF" >> $GITHUB_OUTPUT
@@ -107,29 +145,71 @@ runs:
         PR_TITLE: ${{ inputs.pr_title }}
         PR_BODY: ${{ inputs.pr_body }}
         BASE_BRANCH: ${{ inputs.base_branch }}
+        TEMP_DIR: ${{ steps.pr-details.outputs.temp_dir }}
       run: |
         set -e
 
         echo "## 🤖 Claude 3.7 Sonnet Analysis" >> $GITHUB_STEP_SUMMARY
         echo "Model: claude-3-7-sonnet-latest" >> $GITHUB_STEP_SUMMARY
 
+        # Sanitize user inputs (remove null bytes, control characters, limit size)
+        PR_TITLE_CLEAN=$(echo "$PR_TITLE" | tr -d '\000-\037' | head -c 1000)
+        PR_BODY_CLEAN=$(echo "$PR_BODY" | tr -d '\000' | iconv -c -t UTF-8//IGNORE | head -c 10000)
+
+        # Validate inputs for suspicious patterns
+        if echo "$PR_TITLE_CLEAN$PR_BODY_CLEAN" | grep -qE '\$\(|\`|;[[:space:]]*curl|;[[:space:]]*wget|eval|exec'; then
+          echo "⚠️ Warning: Suspicious pattern detected in PR inputs" >> $GITHUB_STEP_SUMMARY
+          # Continue but log the warning
+        fi
+
         # === PHASE 1: DETECT ALL DOCUMENTATION FILES ===
         # Check for BOTH files before updating anything
         HAS_README=false
         HAS_CLAUDE=false
 
+        # Validate file paths helper function
+        validate_doc_file() {
+          local file=$1
+          # Must be in current directory, not a symlink, and match expected names
+          if [[ ! -f "$file" ]] || [[ -L "$file" ]]; then
+            return 1
+          fi
+          local basename=$(basename "$file")
+          local basename_lower=$(echo "$basename" | tr '[:upper:]' '[:lower:]')
+          if [[ "$basename_lower" != "readme.md" ]] && [[ "$basename_lower" != "claude.md" ]]; then
+            return 1
+          fi
+          # Ensure file is in repo root (no directory traversal)
+          local realpath=$(realpath "$file" 2>/dev/null || echo "")
+          local workdir=$(realpath . 2>/dev/null || echo "")
+          if [[ ! "$realpath" == "$workdir"/* ]]; then
+            return 1
+          fi
+          return 0
+        }
+
         # Case-insensitive check for README.md
-        README_FILE=$(find . -maxdepth 1 -iname "readme.md" -print -quit 2>/dev/null)
+        README_FILE=$(find . -maxdepth 1 -type f -iname "readme.md" -print -quit 2>/dev/null)
         if [ -n "$README_FILE" ]; then
-          HAS_README=true
           README_FILE="${README_FILE#./}"
+          if validate_doc_file "$README_FILE"; then
+            HAS_README=true
+          else
+            echo "⚠️ Invalid README file detected, skipping" >> $GITHUB_STEP_SUMMARY
+            README_FILE=""
+          fi
         fi
 
         # Case-insensitive check for CLAUDE.md
-        CLAUDE_FILE=$(find . -maxdepth 1 -iname "claude.md" -print -quit 2>/dev/null)
+        CLAUDE_FILE=$(find . -maxdepth 1 -type f -iname "claude.md" -print -quit 2>/dev/null)
         if [ -n "$CLAUDE_FILE" ]; then
-          HAS_CLAUDE=true
           CLAUDE_FILE="${CLAUDE_FILE#./}"
+          if validate_doc_file "$CLAUDE_FILE"; then
+            HAS_CLAUDE=true
+          else
+            echo "⚠️ Invalid CLAUDE file detected, skipping" >> $GITHUB_STEP_SUMMARY
+            CLAUDE_FILE=""
+          fi
         fi
 
         # Log detection results for both files
@@ -140,14 +220,38 @@ runs:
         if [ "$HAS_README" = false ] && [ "$HAS_CLAUDE" = false ]; then
           echo "❌ No documentation file found (README.md or CLAUDE.md)" >> $GITHUB_STEP_SUMMARY
           echo "skip_analysis=true" >> $GITHUB_OUTPUT
+          rm -rf "$TEMP_DIR"
           exit 0
         fi
 
-        # Read PR diff
-        PR_DIFF=$(cat /tmp/pr_diff.txt || echo "No diff available")
+        # Read PR diff from secure temp file
+        PR_DIFF_FILE="$TEMP_DIR/pr_diff.txt"
+        if [ -f "$PR_DIFF_FILE" ]; then
+          PR_DIFF=$(cat "$PR_DIFF_FILE")
+        else
+          PR_DIFF="No diff available"
+        fi
 
-        # Get repository structure
-        REPO_STRUCTURE=$(find . -type f -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -o -name "*.py" -o -name "*.go" -o -name "*.java" -o -name "*.yml" -o -name "*.yaml" | grep -v node_modules | grep -v ".git" | head -50 || echo "")
+        # Validate diff size
+        DIFF_SIZE=${#PR_DIFF}
+        MAX_DIFF_SIZE=1048576  # 1MB
+        if [ $DIFF_SIZE -gt $MAX_DIFF_SIZE ]; then
+          echo "⚠️ PR diff too large, truncating..." >> $GITHUB_STEP_SUMMARY
+          PR_DIFF="${PR_DIFF:0:$MAX_DIFF_SIZE}"
+        fi
+
+        # Get repository structure (more restrictive search)
+        REPO_STRUCTURE=$(find . -maxdepth 3 -type f \
+          \( -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -o -name "*.py" -o -name "*.go" -o -name "*.java" -o -name "*.yml" -o -name "*.yaml" \) \
+          -not -path "*/node_modules/*" \
+          -not -path "*/.git/*" \
+          -not -path "*/vendor/*" \
+          -not -path "*/dist/*" \
+          -not -path "*/build/*" \
+          -not -name "*secret*" \
+          -not -name "*credential*" \
+          -not -name "*.env*" \
+          2>/dev/null | head -30 | sed 's|^\./||' || echo "")
 
         ANY_UPDATES=false
 
@@ -159,91 +263,152 @@ runs:
 
           echo "Processing $DOC_FILE..." >> $GITHUB_STEP_SUMMARY
 
+          # Validate doc file path
+          if ! validate_doc_file "$DOC_FILE"; then
+            echo "  ❌ Invalid doc file: $DOC_FILE" >> $GITHUB_STEP_SUMMARY
+            return 1
+          fi
+
           # Read current documentation
           DOC_CONTENT=$(cat "$DOC_FILE")
+
+          # Validate content size
+          CONTENT_SIZE=${#DOC_CONTENT}
+          MAX_CONTENT_SIZE=524288  # 512KB
+          if [ $CONTENT_SIZE -gt $MAX_CONTENT_SIZE ]; then
+            echo "  ⚠️ Doc file too large: $CONTENT_SIZE bytes" >> $GITHUB_STEP_SUMMARY
+            return 1
+          fi
 
           # Prepare the prompt based on file type
           if [ "$DOC_FORMAT" = "README" ]; then
             FORMAT_INSTRUCTION="This is a README.md file. Maintain standard README format with clear sections, proper markdown formatting, badges, installation instructions, usage examples, and project overview. Keep the professional, user-facing documentation style."
-            PROMPT_FILE="/tmp/claude_prompt_readme.txt"
           else
             FORMAT_INSTRUCTION="This is a CLAUDE.md file for AI assistance. Maintain the technical, detailed format suitable for AI context with implementation details, architecture notes, and development guidelines. Keep the detailed, technical documentation style."
-            PROMPT_FILE="/tmp/claude_prompt_claude.txt"
           fi
 
-          # Prepare the prompt
-          cat > "$PROMPT_FILE" << 'PROMPT_EOF'
-        You are a technical documentation expert. Analyze the PR changes and update the documentation if needed.
+          # Create secure prompt file
+          PROMPT_FILE="$TEMP_DIR/claude_prompt_$(openssl rand -hex 8).txt"
 
-        # Context
-        Repository: ${REPO_NAME}
-        PR #${PR_NUMBER}: ${PR_TITLE}
-        PR Description: ${PR_BODY}
+          # Build prompt with safe variable substitution using jq
+          jq -n \
+            --arg repo_name "$REPO_NAME" \
+            --arg pr_number "$PR_NUMBER" \
+            --arg pr_title "$PR_TITLE_CLEAN" \
+            --arg pr_body "$PR_BODY_CLEAN" \
+            --arg doc_file "$DOC_FILE" \
+            --arg doc_content "$DOC_CONTENT" \
+            --arg pr_diff "$PR_DIFF" \
+            --arg repo_structure "$REPO_STRUCTURE" \
+            --arg format_instruction "$FORMAT_INSTRUCTION" \
+            --arg other_files_note "$OTHER_FILES_NOTE" \
+            '
+"You are a technical documentation expert. Analyze the PR changes and update the documentation if needed.
 
-        # Current ${DOC_FILE}:
-        ${DOC_CONTENT}
+# Context
+Repository: \($repo_name)
+PR #\($pr_number): \($pr_title)
+PR Description: \($pr_body)
 
-        # PR Changes (Diff):
-        ${PR_DIFF}
+# Current \($doc_file):
+\($doc_content)
 
-        # Repository Structure (sample):
-        ${REPO_STRUCTURE}
+# PR Changes (Diff):
+\($pr_diff)
 
-        # Format Requirements:
-        ${FORMAT_INSTRUCTION}
+# Repository Structure (sample):
+\($repo_structure)
 
-        # Documentation Context:
-        ${OTHER_FILES_NOTE}
+# Format Requirements:
+\($format_instruction)
 
-        # Your Task
-        Update the ${DOC_FILE} based on the PR changes.
+# Documentation Context:
+\($other_files_note)
 
-        ## CRITICAL RULES - MUST FOLLOW:
-        1. **Direct output only**: Output ONLY the updated documentation content. NO acknowledgments like "I will analyze", "I understand", "Here's the updated", or any explanatory text.
-        2. **Maintain format**: Keep the exact same documentation style and structure as the current file.
-        3. **Update relevant sections**: Only modify sections that relate to the PR changes. Keep everything else exactly as is.
-        4. **Significance check**: Only update if changes are significant (new features, major fixes, API changes, workflow updates). Skip minor changes (typos, formatting tweaks, small refactors).
-        5. **Complete file output**: Provide the COMPLETE updated file content, not just the changed sections.
-        6. **No meta-commentary**: No phrases like "I've updated", "Changes made", or section summaries.
+# Your Task
+Update the \($doc_file) based on the PR changes.
 
-        ## Decision:
-        - If significant updates are needed: Output the COMPLETE updated ${DOC_FILE} content immediately, with no preamble
-        - If no significant updates needed: Output exactly: NO_UPDATES_NEEDED
+## CRITICAL RULES - MUST FOLLOW:
+1. **Direct output only**: Output ONLY the updated documentation content. NO acknowledgments like \"I will analyze\", \"I understand\", \"Here'\''s the updated\", or any explanatory text.
+2. **Maintain format**: Keep the exact same documentation style and structure as the current file.
+3. **Update relevant sections**: Only modify sections that relate to the PR changes. Keep everything else exactly as is.
+4. **Significance check**: Only update if changes are significant (new features, major fixes, API changes, workflow updates). Skip minor changes (typos, formatting tweaks, small refactors).
+5. **Complete file output**: Provide the COMPLETE updated file content, not just the changed sections.
+6. **No meta-commentary**: No phrases like \"I'\''ve updated\", \"Changes made\", or section summaries.
 
-        Start your response immediately with either the updated documentation content or "NO_UPDATES_NEEDED". Nothing else.
-        PROMPT_EOF
+## Decision:
+- If significant updates are needed: Output the COMPLETE updated \($doc_file) content immediately, with no preamble
+- If no significant updates needed: Output exactly: NO_UPDATES_NEEDED
 
-          # Expand variables in prompt
-          FULL_PROMPT=$(eval "cat <<PROMPT_EVAL
-        $(cat $PROMPT_FILE)
-        PROMPT_EVAL
-        ")
+Start your response immediately with either the updated documentation content or \"NO_UPDATES_NEEDED\". Nothing else."
+' -r > "$PROMPT_FILE"
 
-          # Call Claude API
+          chmod 600 "$PROMPT_FILE"
+          FULL_PROMPT=$(cat "$PROMPT_FILE")
+
+          # Call Claude API with secure header handling
           echo "  Calling Claude API for $DOC_FILE..." >> $GITHUB_STEP_SUMMARY
 
+          # Create secure request body file
+          REQUEST_FILE="$TEMP_DIR/request_$(openssl rand -hex 8).json"
+          jq -n \
+            --arg model "claude-3-7-sonnet-latest" \
+            --argjson max_tokens 8192 \
+            --arg content "$FULL_PROMPT" \
+            '{
+              model: $model,
+              max_tokens: $max_tokens,
+              messages: [{
+                role: "user",
+                content: $content
+              }]
+            }' > "$REQUEST_FILE"
+
+          chmod 600 "$REQUEST_FILE"
+
+          # Call API
           RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
             -H "content-type: application/json" \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
-            -d "{
-              \"model\": \"claude-3-7-sonnet-latest\",
-              \"max_tokens\": 8192,
-              \"messages\": [{
-                \"role\": \"user\",
-                \"content\": $(echo "$FULL_PROMPT" | jq -Rs .)
-              }]
-            }")
+            -d @"$REQUEST_FILE")
+
+          # Clean up request file
+          rm -f "$REQUEST_FILE"
+
+          # Validate response is valid JSON
+          if ! echo "$RESPONSE" | jq empty 2>/dev/null; then
+            echo "  ❌ Invalid JSON response from API" >> $GITHUB_STEP_SUMMARY
+            return 1
+          fi
 
           # Check for API errors
           if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
-            ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message')
-            echo "  ❌ Claude API Error for $DOC_FILE: $ERROR_MSG" >> $GITHUB_STEP_SUMMARY
+            ERROR_TYPE=$(echo "$RESPONSE" | jq -r '.error.type // "unknown"')
+            ERROR_CODE=$(echo "$RESPONSE" | jq -r '.error.code // "unknown"')
+            echo "  ❌ Claude API Error for $DOC_FILE: type=$ERROR_TYPE, code=$ERROR_CODE" >> $GITHUB_STEP_SUMMARY
+            return 1
+          fi
+
+          # Validate response structure
+          if ! echo "$RESPONSE" | jq -e '.content[0].text' > /dev/null 2>&1; then
+            echo "  ❌ API response missing expected content field" >> $GITHUB_STEP_SUMMARY
             return 1
           fi
 
           # Extract the response content
           CLAUDE_OUTPUT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+
+          # Validate output size
+          OUTPUT_SIZE=${#CLAUDE_OUTPUT}
+          MAX_OUTPUT_SIZE=524288  # 512KB
+          if [ $OUTPUT_SIZE -gt $MAX_OUTPUT_SIZE ]; then
+            echo "  ❌ Claude output too large: $OUTPUT_SIZE bytes" >> $GITHUB_STEP_SUMMARY
+            return 1
+          fi
+
+          # Sanitize output (remove null bytes, validate UTF-8)
+          CLAUDE_OUTPUT=$(echo "$CLAUDE_OUTPUT" | tr -d '\000' | iconv -c -t UTF-8//IGNORE)
 
           # Check if updates are needed
           if echo "$CLAUDE_OUTPUT" | grep -q "NO_UPDATES_NEEDED"; then
@@ -284,6 +449,9 @@ runs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "✅ No documentation updates needed" >> $GITHUB_STEP_SUMMARY
         fi
+
+        # Clean up temporary directory
+        rm -rf "$TEMP_DIR"
 
     - name: 🔍 Check for Documentation Changes
       id: check-changes
@@ -365,55 +533,105 @@ runs:
         MERGED_PR_NUMBER: ${{ inputs.pr_number }}
         MERGED_PR_TITLE: ${{ inputs.pr_title }}
       run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
+        set -e
 
-        BRANCH="docs/auto-update-$(date +%Y%m%d-%H%M%S)"
+        # Use local git config only
+        git config --local user.name "github-actions[bot]"
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+
+        # Verify configuration was set
+        CONFIGURED_NAME=$(git config --local user.name)
+        if [ "$CONFIGURED_NAME" != "github-actions[bot]" ]; then
+          echo "❌ Failed to set git user configuration" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+
+        # Generate secure branch name
+        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+        RANDOM_SUFFIX=$(openssl rand -hex 4)
+        BRANCH="docs/auto-update-${TIMESTAMP}-${RANDOM_SUFFIX}"
+
+        # Validate branch name
+        if ! [[ "$BRANCH" =~ ^[a-zA-Z0-9/_-]+$ ]]; then
+          echo "❌ Generated invalid branch name" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+
+        # Check branch doesn't already exist
+        if git rev-parse --verify "$BRANCH" 2>/dev/null; then
+          echo "⚠️ Branch $BRANCH already exists, using alternative" >> $GITHUB_STEP_SUMMARY
+          BRANCH="${BRANCH}-$(openssl rand -hex 4)"
+        fi
+
         git checkout -b "$BRANCH"
 
-        # Add only documentation files (case-insensitive match)
-        find . -maxdepth 1 -iname "readme.md" -o -iname "claude.md" | xargs git add 2>/dev/null || true
+        # Add only documentation files (case-insensitive match, type f only)
+        find . -maxdepth 1 -type f \( -iname "readme.md" -o -iname "claude.md" \) -print0 | xargs -0 git add 2>/dev/null || true
 
-        git commit -m "📚 DocSync AI: Update documentation for PR #$MERGED_PR_NUMBER
+        # Sanitize PR title for commit message (remove control chars, limit size)
+        MERGED_PR_TITLE_CLEAN=$(echo "$MERGED_PR_TITLE" | tr -d '\000-\037' | head -c 200)
 
-        Automatically updated documentation based on changes from:
-        - PR #$MERGED_PR_NUMBER: $MERGED_PR_TITLE
+        # Create commit with safe message (using heredoc to avoid injection)
+        git commit -m "$(cat <<'EOF'
+📚 DocSync AI: Update documentation
 
-        Generated by DocSync AI"
+Automatically updated documentation based on merged PR changes.
+
+Generated by DocSync AI
+EOF
+        )"
 
         git push origin "$BRANCH"
 
-        # Create PR
+        # Create PR with sanitized content
+        # Sanitize PR number for display
+        if ! [[ "$MERGED_PR_NUMBER" =~ ^[0-9]+$ ]]; then
+          echo "❌ Invalid PR number for display" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+
+        # Create PR body safely using jq
+        PR_BODY=$(jq -n \
+          --arg pr_num "$MERGED_PR_NUMBER" \
+          '
+"## 📚 Automated Documentation Update
+
+This PR updates the documentation based on changes merged in a recent PR.
+
+### 🔄 Source PR
+- **PR**: #\($pr_num)
+
+### 📝 Changes
+Documentation has been automatically updated to reflect the latest changes in the codebase.
+
+### ✅ Review Checklist
+- [ ] Documentation accurately reflects the code changes
+- [ ] No unrelated sections were modified
+- [ ] Formatting and style are consistent
+- [ ] Examples and code snippets are up to date
+
+---
+🤖 *Automated by DocSync AI*"
+' -r)
+
         PR_URL=$(gh pr create \
-          --title "📚 DocSync AI: Update Documentation for PR #$MERGED_PR_NUMBER" \
-          --body "## 📚 Automated Documentation Update
-
-        This PR updates the documentation based on changes merged in PR #$MERGED_PR_NUMBER.
-
-        ### 🔄 Source PR
-        - **PR**: #$MERGED_PR_NUMBER
-        - **Title**: $MERGED_PR_TITLE
-
-        ### 📝 Changes
-        Documentation has been automatically updated to reflect the latest changes in the codebase.
-
-        ### ✅ Review Checklist
-        - [ ] Documentation accurately reflects the code changes
-        - [ ] No unrelated sections were modified
-        - [ ] Formatting and style are consistent
-        - [ ] Examples and code snippets are up to date
-
-        ---
-        🤖 *Automated by DocSync AI*
-        " \
+          --title "📚 DocSync AI: Update Documentation" \
+          --body "$PR_BODY" \
           --base "$BASE_BRANCH" \
           --head "$BRANCH")
 
-        # Add labels
+        # Add labels (validate label format)
         PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
-        for label in $(echo "$PR_LABELS" | tr ',' ' '); do
-          gh pr edit "$PR_NUMBER" --add-label "$label" 2>/dev/null || echo "Label '$label' not found, skipping"
-        done
+        if [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+          IFS=',' read -ra LABEL_ARRAY <<< "$PR_LABELS"
+          for label in "${LABEL_ARRAY[@]}"; do
+            # Trim whitespace and validate
+            label=$(echo "$label" | xargs)
+            if [[ "$label" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+              gh pr edit "$PR_NUMBER" --add-label "$label" 2>/dev/null || echo "Label '$label' not found, skipping"
+            fi
+          done
+        fi
 
         echo "pr_created=true" >> $GITHUB_OUTPUT
         echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
