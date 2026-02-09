@@ -329,12 +329,12 @@ PR Description: \($pr_body)
 Update the \($doc_file) based on the PR changes.
 
 ## CRITICAL RULES - MUST FOLLOW:
-1. **Direct output only**: Output ONLY the updated documentation content. NO acknowledgments like \"I will analyze\", \"I understand\", \"Here'\''s the updated\", or any explanatory text.
+1. **Direct output only**: Output ONLY the updated documentation content. NO acknowledgments like \"I will analyze\", \"I understand\", \"Here''s the updated\", or any explanatory text.
 2. **Maintain format**: Keep the exact same documentation style and structure as the current file.
 3. **Update relevant sections**: Only modify sections that relate to the PR changes. Keep everything else exactly as is.
 4. **Significance check**: Only update if changes are significant (new features, major fixes, API changes, workflow updates). Skip minor changes (typos, formatting tweaks, small refactors).
 5. **Complete file output**: Provide the COMPLETE updated file content, not just the changed sections.
-6. **No meta-commentary**: No phrases like \"I'\''ve updated\", \"Changes made\", or section summaries.
+6. **No meta-commentary**: No phrases like \"I''ve updated\", \"Changes made\", or section summaries.
 
 ## Decision:
 - If significant updates are needed: Output the COMPLETE updated \($doc_file) content immediately, with no preamble
