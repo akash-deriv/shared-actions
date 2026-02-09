@@ -302,46 +302,45 @@ runs:
             --arg repo_structure "$REPO_STRUCTURE" \
             --arg format_instruction "$FORMAT_INSTRUCTION" \
             --arg other_files_note "$OTHER_FILES_NOTE" \
-            '
-"You are a technical documentation expert. Analyze the PR changes and update the documentation if needed.
+            '"You are a technical documentation expert. Analyze the PR changes and update the documentation if needed.
 
-# Context
-Repository: \($repo_name)
-PR #\($pr_number): \($pr_title)
-PR Description: \($pr_body)
+            # Context
+            Repository: \($repo_name)
+            PR #\($pr_number): \($pr_title)
+            PR Description: \($pr_body)
 
-# Current \($doc_file):
-\($doc_content)
+            # Current \($doc_file):
+            \($doc_content)
 
-# PR Changes (Diff):
-\($pr_diff)
+            # PR Changes (Diff):
+            \($pr_diff)
 
-# Repository Structure (sample):
-\($repo_structure)
+            # Repository Structure (sample):
+            \($repo_structure)
 
-# Format Requirements:
-\($format_instruction)
+            # Format Requirements:
+            \($format_instruction)
 
-# Documentation Context:
-\($other_files_note)
+            # Documentation Context:
+            \($other_files_note)
 
-# Your Task
-Update the \($doc_file) based on the PR changes.
+            # Your Task
+            Update the \($doc_file) based on the PR changes.
 
-## CRITICAL RULES - MUST FOLLOW:
-1. **Direct output only**: Output ONLY the updated documentation content. NO acknowledgments like \"I will analyze\", \"I understand\", \"Here''s the updated\", or any explanatory text.
-2. **Maintain format**: Keep the exact same documentation style and structure as the current file.
-3. **Update relevant sections**: Only modify sections that relate to the PR changes. Keep everything else exactly as is.
-4. **Significance check**: Only update if changes are significant (new features, major fixes, API changes, workflow updates). Skip minor changes (typos, formatting tweaks, small refactors).
-5. **Complete file output**: Provide the COMPLETE updated file content, not just the changed sections.
-6. **No meta-commentary**: No phrases like \"I''ve updated\", \"Changes made\", or section summaries.
+            ## CRITICAL RULES - MUST FOLLOW:
+            1. **Direct output only**: Output ONLY the updated documentation content. NO acknowledgments like \"I will analyze\", \"I understand\", \"Here''s the updated\", or any explanatory text.
+            2. **Maintain format**: Keep the exact same documentation style and structure as the current file.
+            3. **Update relevant sections**: Only modify sections that relate to the PR changes. Keep everything else exactly as is.
+            4. **Significance check**: Only update if changes are significant (new features, major fixes, API changes, workflow updates). Skip minor changes (typos, formatting tweaks, small refactors).
+            5. **Complete file output**: Provide the COMPLETE updated file content, not just the changed sections.
+            6. **No meta-commentary**: No phrases like \"I''ve updated\", \"Changes made\", or section summaries.
 
-## Decision:
-- If significant updates are needed: Output the COMPLETE updated \($doc_file) content immediately, with no preamble
-- If no significant updates needed: Output exactly: NO_UPDATES_NEEDED
+            ## Decision:
+            - If significant updates are needed: Output the COMPLETE updated \($doc_file) content immediately, with no preamble
+            - If no significant updates needed: Output exactly: NO_UPDATES_NEEDED
 
-Start your response immediately with either the updated documentation content or \"NO_UPDATES_NEEDED\". Nothing else."
-' -r > "$PROMPT_FILE"
+            Start your response immediately with either the updated documentation content or \"NO_UPDATES_NEEDED\". Nothing else."
+            ' -r > "$PROMPT_FILE"
 
           chmod 600 "$PROMPT_FILE"
           FULL_PROMPT=$(cat "$PROMPT_FILE")
