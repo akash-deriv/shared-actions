@@ -641,6 +641,116 @@ Documentation has been automatically updated to reflect the latest changes in th
         echo "### 🔀 Documentation PR Created: #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
         echo "$PR_URL" >> $GITHUB_STEP_SUMMARY
 
+    - name: 💬 Post @docbot Usage Guide Comment
+      if: steps.create-doc-pr.outputs.pr_created == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        PR_NUMBER: ${{ steps.create-doc-pr.outputs.pr_number }}
+      run: |
+        set -e
+
+        echo "Posting @docbot usage guide comment..."
+
+        # Create informative comment about @docbot commands using jq for safety
+        DOCBOT_COMMENT=$(jq -n '
+"## 🤖 Interactive Documentation Updates with @docbot
+
+Thank you for reviewing this automated documentation update! You can now refine the documentation using simple commands.
+
+### 📋 Available Commands
+
+Comment on this PR with any of the following commands to update the documentation:
+
+#### **Update Commands**
+```
+@docbot update readme
+```
+Updates the README.md file with general improvements or refinements.
+
+```
+@docbot update claude
+```
+Updates the CLAUDE.md file with technical details for AI assistance.
+
+```
+@docbot clarify <section-name>
+```
+Makes a specific section clearer and more detailed.
+**Example:** `@docbot clarify auth section`
+
+```
+@docbot add example for <feature>
+```
+Adds a code example or usage demonstration for a feature.
+**Example:** `@docbot add example for API authentication`
+
+```
+@docbot expand <topic>
+```
+Expands documentation on a specific topic with more details.
+**Example:** `@docbot expand installation steps`
+
+```
+@docbot fix <issue>
+```
+Fixes a specific issue in the documentation.
+**Example:** `@docbot fix typo in configuration section`
+
+#### **Revert Commands**
+```
+@docbot revert last change
+```
+Reverts the most recent documentation change.
+
+```
+@docbot revert to <commit-hash>
+```
+Reverts to a specific commit (use short hash from commit history).
+**Example:** `@docbot revert to abc1234`
+
+---
+
+### ✨ How It Works
+
+1. **Comment with a command** — Simply post a comment starting with `@docbot` followed by your instruction
+2. **AI processes your request** — Claude AI analyzes your command and the current documentation
+3. **Changes are committed automatically** — Updates are applied and committed directly to this PR
+4. **You get notified** — A confirmation comment shows what was changed
+
+### 🎯 Example Usage
+
+```
+@docbot clarify the installation process
+```
+
+```
+@docbot add example for error handling
+```
+
+```
+@docbot expand the API authentication section with more details
+```
+
+### 💡 Tips
+
+- Be specific in your requests for better results
+- You can issue multiple commands in separate comments
+- The AI makes intelligent decisions about what to update
+- Changes only affect documentation files (README.md and CLAUDE.md)
+
+---
+
+**Note:** This is a controlled interface — commands are validated and processed securely. All changes are reviewable before merging.
+
+🤖 *Powered by DocSync AI + Claude 3.7 Sonnet*"
+' -r)
+
+        # Post the comment
+        gh pr comment "$PR_NUMBER" --body "$DOCBOT_COMMENT"
+
+        echo "✅ Posted @docbot usage guide comment to PR #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
+
     - name: ✅ No Updates Needed
       if: steps.claude-analysis.outputs.skip_analysis == 'true' || steps.check-changes.outputs.has_changes == 'false'
       shell: bash
