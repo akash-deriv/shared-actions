@@ -95,44 +95,32 @@ jobs:
 Simply merge your PR - DocSync AI will automatically analyze changes and create a documentation PR if needed.
 
 #### Interactive Mode (PR Comments)
-On any DocSync AI PR, use the **@docbot command interface** for controlled documentation updates:
+On any DocSync AI PR, comment with suggestions:
 
-**🎯 Command Examples:**
-```
-@docbot update readme
-@docbot clarify auth section
-@docbot add example for API authentication
-@docbot expand installation steps
-@docbot fix typo in configuration section
-@docbot revert last change
-```
-
-**Legacy format (still supported):**
 ```
 docsync: Add installation instructions for Windows users
 ```
 
-**Features:**
-- ✨ **Structured commands** - Clear, predictable interface (`@docbot <action> <target>`)
-- 🎯 **Specific actions** - Update, clarify, add examples, expand, fix, or revert
-- 🔄 **Revert capability** - Undo changes with `@docbot revert last change`
-- 📋 **Auto-guide** - Each DocSync PR includes a comment with all available commands
-- 🤖 **AI-powered** - Claude analyzes context and applies changes intelligently
+```
+docsync: Update the API examples to show authentication
+```
+
+```
+docsync: Clarify the difference between setup() and init()
+```
 
 **Important:**
-- Commands MUST start with `@docbot` (case-insensitive)
+- Comments MUST start with `docsync:` (case-insensitive)
 - Only works on DocSync-generated PRs (with `docsync-ai` or `automated` labels)
 - AI makes the final decision - may reject, modify, or improve suggestions
 - Provides quality control and sanitization of user input
-- All changes are committed automatically and reviewable before merge
 
 ### How It Works
 
-1. **Merge Trigger**: When PR merges → AI analyzes diff → Creates doc PR if significant changes detected → Posts @docbot usage guide
-2. **Comment Trigger**: When user comments `@docbot <command>` → AI parses command → Applies changes → Commits to PR
+1. **Merge Trigger**: When PR merges → AI analyzes diff → Creates doc PR if significant changes detected
+2. **Comment Trigger**: When user comments `docsync: <suggestion>` → AI reviews suggestion → Updates PR if beneficial
 3. **AI Decision Making**: Claude AI evaluates all suggestions and makes expert decisions on documentation quality
 4. **Safety**: Validates PRs, sanitizes input, only modifies documentation files
-5. **Revert Support**: Can undo changes with `@docbot revert last change` for easy rollback
 
 See [example-docsync-workflow.yml](example-docsync-workflow.yml) for a complete configuration example with detailed comments.
 
