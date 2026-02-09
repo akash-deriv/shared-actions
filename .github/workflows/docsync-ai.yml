@@ -29,7 +29,7 @@ on:
         default: 'merge'
         type: string
       comment_body:
-        description: 'Comment body (only for comment trigger, must start with "docsync:")'
+        description: 'Comment body (only for comment trigger, must start with "@docbot" or "docsync:")'
         required: false
         default: ''
         type: string

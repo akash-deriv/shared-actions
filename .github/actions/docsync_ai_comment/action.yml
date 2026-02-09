@@ -15,7 +15,7 @@ inputs:
     description: "PR number where comment was made"
     required: true
   comment_body:
-    description: "Comment body with user suggestion (must start with 'docsync:')"
+    description: "Comment body with user suggestion (must start with '@docbot' or 'docsync:')"
     required: true
   base_branch:
     description: "Base branch for documentation PR (e.g., master or main)"
@@ -36,7 +36,7 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: ✅ Validate Comment Prefix
+    - name: ✅ Validate and Parse Comment
       id: validate
       shell: bash
       env:
@@ -55,10 +55,79 @@ runs:
           # Continue but log warning
         fi
 
-        # Check if comment starts with "docsync:" (case-insensitive)
-        if echo "$COMMENT_BODY_CLEAN" | grep -qiE "^docsync:[[:space:]]"; then
+        COMMAND_TYPE=""
+        COMMAND_ACTION=""
+        COMMAND_TARGET=""
+        SUGGESTION=""
+
+        # Check if comment starts with "@docbot" (case-insensitive)
+        if echo "$COMMENT_BODY_CLEAN" | grep -qiE "^@docbot[[:space:]]"; then
+          COMMAND_TYPE="docbot"
           echo "valid=true" >> $GITHUB_OUTPUT
-          echo "✅ Valid docsync comment detected" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Valid @docbot command detected" >> $GITHUB_STEP_SUMMARY
+
+          # Extract command (everything after "@docbot ")
+          COMMAND_TEXT=$(echo "$COMMENT_BODY_CLEAN" | sed -E 's/^@[Dd][Oo][Cc][Bb][Oo][Tt][[:space:]]+//')
+
+          # Parse command action (first word)
+          COMMAND_ACTION=$(echo "$COMMAND_TEXT" | awk '{print tolower($1)}')
+
+          # Parse command target (rest of the command)
+          COMMAND_TARGET=$(echo "$COMMAND_TEXT" | sed -E 's/^[^[:space:]]+[[:space:]]*//')
+
+          # Validate command is not empty
+          if [ -z "$COMMAND_ACTION" ]; then
+            echo "valid=false" >> $GITHUB_OUTPUT
+            echo "❌ @docbot command is empty" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # Set outputs
+          echo "command_type=$COMMAND_TYPE" >> $GITHUB_OUTPUT
+          echo "command_action=$COMMAND_ACTION" >> $GITHUB_OUTPUT
+          echo "command_target<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMAND_TARGET" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # Create formatted suggestion for Claude based on command
+          case "$COMMAND_ACTION" in
+            update)
+              SUGGESTION="Update the $COMMAND_TARGET with improvements and refinements"
+              ;;
+            clarify)
+              SUGGESTION="Clarify and make the following section more detailed: $COMMAND_TARGET"
+              ;;
+            add)
+              SUGGESTION="Add $COMMAND_TARGET to the documentation"
+              ;;
+            expand)
+              SUGGESTION="Expand the documentation on: $COMMAND_TARGET"
+              ;;
+            fix)
+              SUGGESTION="Fix the following issue in the documentation: $COMMAND_TARGET"
+              ;;
+            revert)
+              echo "command_is_revert=true" >> $GITHUB_OUTPUT
+              SUGGESTION="REVERT: $COMMAND_TARGET"
+              ;;
+            *)
+              SUGGESTION="$COMMAND_TEXT"
+              ;;
+          esac
+
+          echo "suggestion<<EOF" >> $GITHUB_OUTPUT
+          echo "$SUGGESTION" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "### @docbot Command:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Action**: $COMMAND_ACTION" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target**: ${COMMAND_TARGET:-(none)}" >> $GITHUB_STEP_SUMMARY
+
+        # Check if comment starts with "docsync:" (case-insensitive) - legacy format
+        elif echo "$COMMENT_BODY_CLEAN" | grep -qiE "^docsync:[[:space:]]"; then
+          COMMAND_TYPE="legacy"
+          echo "valid=true" >> $GITHUB_OUTPUT
+          echo "✅ Valid docsync comment detected (legacy format)" >> $GITHUB_STEP_SUMMARY
 
           # Extract suggestion safely (everything after "docsync:")
           SUGGESTION=$(echo "$COMMENT_BODY_CLEAN" | sed -E 's/^[Dd][Oo][Cc][Ss][Yy][Nn][Cc]:[[:space:]]*//')
@@ -70,23 +139,22 @@ runs:
             exit 0
           fi
 
-          # Limit suggestion size for output
-          SUGGESTION_DISPLAY=$(echo "$SUGGESTION" | head -c 500)
-
+          echo "command_type=$COMMAND_TYPE" >> $GITHUB_OUTPUT
           echo "suggestion<<EOF" >> $GITHUB_OUTPUT
           echo "$SUGGESTION" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-          echo "### User Suggestion:" >> $GITHUB_STEP_SUMMARY
+          echo "### User Suggestion (Legacy):" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "$SUGGESTION_DISPLAY" >> $GITHUB_STEP_SUMMARY
+          echo "${SUGGESTION:0:500}" >> $GITHUB_STEP_SUMMARY
           if [ ${#SUGGESTION} -gt 500 ]; then
             echo "... (truncated for display)" >> $GITHUB_STEP_SUMMARY
           fi
           echo '```' >> $GITHUB_STEP_SUMMARY
+
         else
           echo "valid=false" >> $GITHUB_OUTPUT
-          echo "❌ Comment does not start with 'docsync:' - skipping" >> $GITHUB_STEP_SUMMARY
+          echo "❌ Comment does not start with '@docbot' or 'docsync:' - skipping" >> $GITHUB_STEP_SUMMARY
           exit 0
         fi
 
@@ -187,9 +255,159 @@ runs:
         ref: ${{ steps.verify-pr.outputs.pr_branch }}
         fetch-depth: 0
 
+    - name: 🔄 Handle Revert Command
+      id: handle-revert
+      if: steps.verify-pr.outputs.is_docsync_pr == 'true' && steps.validate.outputs.command_is_revert == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+        COMMAND_TARGET: ${{ steps.validate.outputs.command_target }}
+      run: |
+        set -e
+
+        echo "## 🔄 Processing Revert Command" >> $GITHUB_STEP_SUMMARY
+
+        # Configure git
+        git config --local user.name "github-actions[bot]"
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+
+        # Parse revert target
+        REVERT_TARGET=$(echo "$COMMAND_TARGET" | xargs)
+
+        if echo "$REVERT_TARGET" | grep -qiE "^last[[:space:]]+change"; then
+          # Revert to previous commit
+          echo "Reverting to previous commit..." >> $GITHUB_STEP_SUMMARY
+
+          # Check if there's more than one commit
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          if [ "$COMMIT_COUNT" -le 1 ]; then
+            echo "❌ Cannot revert: only one commit in branch" >> $GITHUB_STEP_SUMMARY
+            echo "reverted=false" >> $GITHUB_OUTPUT
+
+            COMMENT_BODY=$(jq -n '"❌ **Cannot Revert**
+
+            There is only one commit in this branch, so there is nothing to revert to.
+
+            ---
+            🤖 *Automated by DocSync AI*"
+            ' -r)
+
+            gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
+            exit 0
+          fi
+
+          # Revert last commit
+          git reset --hard HEAD~1
+          git push --force origin HEAD
+
+          COMMENT_BODY=$(jq -n '"🔄 **Reverted Last Change**
+
+          The most recent documentation change has been reverted.
+
+          ---
+          🤖 *Automated by DocSync AI*"
+          ' -r)
+
+          gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
+
+          echo "reverted=true" >> $GITHUB_OUTPUT
+          echo "✅ Successfully reverted last change" >> $GITHUB_STEP_SUMMARY
+
+        elif echo "$REVERT_TARGET" | grep -qiE "^to[[:space:]]+[a-f0-9]+"; then
+          # Revert to specific commit
+          COMMIT_HASH=$(echo "$REVERT_TARGET" | sed -E 's/^to[[:space:]]+([a-f0-9]+).*/\1/')
+
+          # Validate commit hash format
+          if ! [[ "$COMMIT_HASH" =~ ^[a-f0-9]{6,40}$ ]]; then
+            echo "❌ Invalid commit hash format" >> $GITHUB_STEP_SUMMARY
+            echo "reverted=false" >> $GITHUB_OUTPUT
+
+            COMMENT_BODY=$(jq -n \
+              --arg hash "$COMMIT_HASH" \
+              '"❌ **Invalid Commit Hash**
+
+              The commit hash `\($hash)` is not valid.
+
+              Commit hashes should be 6-40 hexadecimal characters (0-9, a-f).
+
+              **Example:** `@docbot revert to abc1234`
+
+              ---
+              🤖 *Automated by DocSync AI*"
+              ' -r)
+
+            gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
+            exit 0
+          fi
+
+          echo "Reverting to commit $COMMIT_HASH..." >> $GITHUB_STEP_SUMMARY
+
+          # Check if commit exists
+          if ! git cat-file -e "$COMMIT_HASH" 2>/dev/null; then
+            echo "❌ Commit $COMMIT_HASH not found" >> $GITHUB_STEP_SUMMARY
+            echo "reverted=false" >> $GITHUB_OUTPUT
+
+            COMMENT_BODY=$(jq -n \
+              --arg hash "$COMMIT_HASH" \
+              '"❌ **Commit Not Found**
+
+              The commit `\($hash)` does not exist in this branch.
+
+              You can find valid commit hashes by viewing the commit history of this PR.
+
+              ---
+              🤖 *Automated by DocSync AI*"
+              ' -r)
+
+            gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
+            exit 0
+          fi
+
+          # Reset to specified commit
+          git reset --hard "$COMMIT_HASH"
+          git push --force origin HEAD
+
+          COMMENT_BODY=$(jq -n \
+            --arg hash "$COMMIT_HASH" \
+            '"🔄 **Reverted to Commit**
+
+            Reverted to commit: `\($hash)`
+
+            ---
+            🤖 *Automated by DocSync AI*"
+            ' -r)
+
+          gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
+
+          echo "reverted=true" >> $GITHUB_OUTPUT
+          echo "✅ Successfully reverted to commit $COMMIT_HASH" >> $GITHUB_STEP_SUMMARY
+
+        else
+          echo "❌ Invalid revert command format" >> $GITHUB_STEP_SUMMARY
+          echo "reverted=false" >> $GITHUB_OUTPUT
+
+          # Post helpful error message
+          COMMENT_BODY=$(jq -n '"❌ **Invalid Revert Command**
+
+          The revert command format was not recognized.
+
+          **Valid formats:**
+          - `@docbot revert last change` - Reverts the most recent commit
+          - `@docbot revert to <commit-hash>` - Reverts to a specific commit (e.g., `@docbot revert to abc1234`)
+
+          Please use one of these formats and try again.
+
+          ---
+          🤖 *Automated by DocSync AI*"
+          ' -r)
+
+          gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
+        fi
+
     - name: 🤖 Run Claude 3.7 Sonnet Documentation Analysis
       id: claude-analysis
-      if: steps.verify-pr.outputs.is_docsync_pr == 'true'
+      if: steps.verify-pr.outputs.is_docsync_pr == 'true' && steps.handle-revert.outputs.reverted != 'true'
       shell: bash
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
@@ -316,39 +534,38 @@ runs:
             --arg user_suggestion "$USER_SUGGESTION_CLEAN" \
             --arg format_instruction "$FORMAT_INSTRUCTION" \
             --arg other_files_note "$OTHER_FILES_NOTE" \
-            '
-"You are a technical documentation expert. A user has provided a suggestion for improving the documentation in a DocSync PR.
+            '"You are a technical documentation expert. A user has provided a suggestion for improving the documentation in a DocSync PR.
 
-# Context
-Repository: \($repo_name)
-PR #\($pr_number) (DocSync Documentation PR)
+            # Context
+            Repository: \($repo_name)
+            PR #\($pr_number) (DocSync Documentation PR)
 
-# Current \($doc_file):
-\($doc_content)
+            # Current \($doc_file):
+            \($doc_content)
 
-# User Suggestion:
-\($user_suggestion)
+            # User Suggestion:
+            \($user_suggestion)
 
-# Format Requirements:
-\($format_instruction)
+            # Format Requirements:
+            \($format_instruction)
 
-# Documentation Context:
-\($other_files_note)
+            # Documentation Context:
+            \($other_files_note)
 
-# Your Task
-Apply the user'\''s suggestion to update the \($doc_file).
+            # Your Task
+            Apply the user''s suggestion to update the \($doc_file).
 
-## CRITICAL RULES - MUST FOLLOW:
-1. **Direct output only**: Output ONLY the updated documentation content. NO acknowledgments like \"I will apply\", \"I understand\", \"Here'\''s the updated\", or any explanatory text.
-2. **Maintain format**: Keep the exact same documentation style and structure as the current file.
-3. **Follow user intent**: Carefully interpret and apply the user'\''s suggestion. If the suggestion is vague, make reasonable improvements.
-4. **Update relevant sections**: Only modify sections relevant to the suggestion. Keep everything else exactly as is.
-5. **Complete file output**: Provide the COMPLETE updated file content, not just the changed sections.
-6. **No meta-commentary**: No phrases like \"I'\''ve updated\", \"Changes made\", or section summaries.
-7. **Quality standards**: Ensure updates are accurate, clear, and improve documentation quality.
+            ## CRITICAL RULES - MUST FOLLOW:
+            1. **Direct output only**: Output ONLY the updated documentation content. NO acknowledgments like \"I will apply\", \"I understand\", \"Here''s the updated\", or any explanatory text.
+            2. **Maintain format**: Keep the exact same documentation style and structure as the current file.
+            3. **Follow user intent**: Carefully interpret and apply the user''s suggestion. If the suggestion is vague, make reasonable improvements.
+            4. **Update relevant sections**: Only modify sections relevant to the suggestion. Keep everything else exactly as is.
+            5. **Complete file output**: Provide the COMPLETE updated file content, not just the changed sections.
+            6. **No meta-commentary**: No phrases like \"I''ve updated\", \"Changes made\", or section summaries.
+            7. **Quality standards**: Ensure updates are accurate, clear, and improve documentation quality.
 
-Start your response immediately with the complete updated \($doc_file) content. Nothing else."
-' -r > "$PROMPT_FILE"
+            Start your response immediately with the complete updated \($doc_file) content. Nothing else."
+            ' -r > "$PROMPT_FILE"
 
           chmod 600 "$PROMPT_FILE"
           FULL_PROMPT=$(cat "$PROMPT_FILE")
@@ -513,15 +730,12 @@ Start your response immediately with the complete updated \($doc_file) content. 
             exit 1
           fi
 
-          # Create commit with safe message (using heredoc to avoid injection)
-          git commit -m "$(cat <<'EOF'
-📚 DocSync AI: Apply user suggestion from comment
+          # Create commit with safe message
+          git commit -m "📚 DocSync AI: Apply user suggestion from comment
 
-Applied documentation updates based on user comment.
+          Applied documentation updates based on user comment.
 
-Generated by DocSync AI
-EOF
-          )"
+          Generated by DocSync AI"
 
           git push origin HEAD
 
@@ -531,17 +745,16 @@ EOF
           # Add confirmation comment to PR using safe format
           COMMENT_BODY=$(jq -n \
             --arg files "$CHANGED_FILES" \
-            '
-"✅ **DocSync AI Update Applied**
+            '"✅ **DocSync AI Update Applied**
 
-Your documentation suggestion has been applied and committed to this PR.
+            Your documentation suggestion has been applied and committed to this PR.
 
-📝 **Updated Files:**
-\($files)
+            📝 **Updated Files:**
+            \($files)
 
----
-🤖 *Automated by DocSync AI*"
-' -r)
+            ---
+            🤖 *Automated by DocSync AI*"
+            ' -r)
 
           gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
 
