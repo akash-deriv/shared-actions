@@ -843,7 +843,7 @@ runs:
           git checkout -
 
           # Get diff for display (limit size) - show only changed lines with no context
-          DIFF_OUTPUT=$(git diff --unified=0 "origin/$REVIEW_BRANCH"^.."origin/$REVIEW_BRANCH" | head -c 4000)
+          DIFF_OUTPUT=$(git diff --unified=0 --color=never "origin/$REVIEW_BRANCH"^.."origin/$REVIEW_BRANCH" | grep -E '^(diff --git|[\+\-][^\+\-])' | head -c 4000)
 
           # Get list of changed files
           CHANGED_FILES=$(git diff --name-only "origin/$REVIEW_BRANCH"^.."origin/$REVIEW_BRANCH" | sed 's/^/- /')
