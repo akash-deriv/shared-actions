@@ -842,8 +842,8 @@ runs:
           # Switch back to PR branch
           git checkout -
 
-          # Get diff for display (limit size) - show only changed lines with no context
-          DIFF_OUTPUT=$(git diff --unified=0 --color=never "origin/$REVIEW_BRANCH"^.."origin/$REVIEW_BRANCH" | grep -v '^index ' | head -c 4000)
+          # Get diff for display (limit size) - show only changed lines with minimal context for proper colorization
+          DIFF_OUTPUT=$(git diff --unified=1 --color=never "origin/$REVIEW_BRANCH"^.."origin/$REVIEW_BRANCH" | grep -v '^index ' | head -c 4000)
 
           # Get list of changed files
           CHANGED_FILES=$(git diff --name-only "origin/$REVIEW_BRANCH"^.."origin/$REVIEW_BRANCH" | sed 's/^/- /')
