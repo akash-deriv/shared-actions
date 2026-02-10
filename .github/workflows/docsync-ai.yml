@@ -14,12 +14,22 @@ on:
         default: 'documentation,automated'
         type: string
       slack_webhook_url:
-        description: 'Slack webhook URL for notifications (optional, can use secret instead)'
+        description: 'Slack webhook URL for notifications (optional, legacy support)'
         required: false
         default: ''
         type: string
       repository_owner:
-        description: 'Repository owner name for Slack notifications'
+        description: 'Repository owner name for Slack notifications (legacy, use slack_user_id instead)'
+        required: false
+        default: ''
+        type: string
+      slack_channel_id:
+        description: 'Slack channel ID for notifications (e.g., C01234567)'
+        required: false
+        default: ''
+        type: string
+      slack_user_id:
+        description: 'Slack user ID to mention in notifications (e.g., U01234567)'
         required: false
         default: ''
         type: string
@@ -46,7 +56,10 @@ on:
         description: 'Anthropic API key for Claude AI'
         required: true
       DOCSYNC_SLACK_WEBHOOK:
-        description: 'Slack webhook URL for notifications (optional if provided via input)'
+        description: 'Slack webhook URL for notifications (optional, legacy support)'
+        required: false
+      SLACK_OAUTH_TOKEN:
+        description: 'Slack OAuth token from shared-actions repo (automatically provided)'
         required: false
 
 concurrency:
@@ -74,6 +87,9 @@ jobs:
       BASE_BRANCH: ${{ inputs.base_branch }}
       PR_LABELS: ${{ inputs.pr_labels }}
       SLACK_WEBHOOK: ${{ inputs.slack_webhook_url || secrets.DOCSYNC_SLACK_WEBHOOK }}
+      SLACK_OAUTH_TOKEN: ${{ secrets.SLACK_OAUTH_TOKEN }}
+      SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
+      SLACK_USER_ID: ${{ inputs.slack_user_id }}
       REPO_OWNER: ${{ inputs.repository_owner }}
 
     steps:
@@ -108,7 +124,7 @@ jobs:
           pr_labels: ${{ inputs.pr_labels }}
 
       - name: 📢 Send Slack Notification - Documentation PR Created
-        if: steps.docsync.outputs.doc_pr_created == 'true' && env.SLACK_WEBHOOK != ''
+        if: steps.docsync.outputs.doc_pr_created == 'true' && (env.SLACK_OAUTH_TOKEN != '' || env.SLACK_WEBHOOK != '')
         env:
           DOC_PR_NUMBER: ${{ steps.docsync.outputs.doc_pr_number }}
           DOC_PR_URL: ${{ steps.docsync.outputs.doc_pr_url }}
@@ -116,12 +132,6 @@ jobs:
           MERGED_PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -e
-
-          # Validate webhook URL format
-          if [[ ! "$SLACK_WEBHOOK" =~ ^https://hooks\.slack\.com/services/ ]]; then
-            echo "⚠️ Warning: Invalid Slack webhook URL format, skipping notification" >> $GITHUB_STEP_SUMMARY
-            exit 0
-          fi
 
           # Sanitize inputs for Slack message
           MERGED_PR_TITLE_CLEAN=$(echo "$MERGED_PR_TITLE" | tr -d '\000-\037' | head -c 200)
@@ -133,17 +143,36 @@ jobs:
             exit 0
           fi
 
-          # Format repository owner mention for Slack
-          OWNER_MENTION=""
-          if [ -n "$REPO_OWNER" ]; then
-            # Sanitize owner mention
-            REPO_OWNER_CLEAN=$(echo "$REPO_OWNER" | tr -d '\000-\037' | head -c 50)
-            OWNER_MENTION="<@$REPO_OWNER_CLEAN> "
+          # Determine which Slack method to use
+          USE_OAUTH=false
+          if [ -n "$SLACK_OAUTH_TOKEN" ] && [ -n "$SLACK_CHANNEL_ID" ]; then
+            USE_OAUTH=true
+            echo "Using Slack OAuth token method" >> $GITHUB_STEP_SUMMARY
+          elif [ -n "$SLACK_WEBHOOK" ]; then
+            echo "Using Slack webhook method (legacy)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Warning: No Slack configuration found, skipping notification" >> $GITHUB_STEP_SUMMARY
+            exit 0
           fi
 
-          # Create Slack payload safely using jq
+          # Format user mention for Slack
+          USER_MENTION=""
+          if [ -n "$SLACK_USER_ID" ]; then
+            # Validate Slack user ID format (U followed by alphanumeric)
+            if [[ "$SLACK_USER_ID" =~ ^U[A-Z0-9]{8,10}$ ]]; then
+              USER_MENTION="<@$SLACK_USER_ID> "
+            else
+              echo "⚠️ Warning: Invalid Slack user ID format: $SLACK_USER_ID" >> $GITHUB_STEP_SUMMARY
+            fi
+          elif [ -n "$REPO_OWNER" ]; then
+            # Legacy support: use REPO_OWNER if provided
+            REPO_OWNER_CLEAN=$(echo "$REPO_OWNER" | tr -d '\000-\037' | head -c 50)
+            USER_MENTION="<@$REPO_OWNER_CLEAN> "
+          fi
+
+          # Create Slack message payload
           SLACK_PAYLOAD=$(jq -n \
-            --arg owner "$OWNER_MENTION" \
+            --arg user "$USER_MENTION" \
             --arg repo "${{ github.repository }}" \
             --arg doc_pr_url "$DOC_PR_URL_CLEAN" \
             --arg doc_pr_num "$DOC_PR_NUMBER" \
@@ -155,14 +184,14 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "\($owner):book: *Documentation Update Ready*\n*<\($doc_pr_url)|PR #\($doc_pr_num)>* in `\($repo)`"
+                    "text": "\($user):book: *Documentation Update Ready*\n*<\($doc_pr_url)|PR #\($doc_pr_num)>* in `\($repo)`"
                   }
                 },
                 {
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "Documentation has been automatically updated based on:\n- *PR #\($merged_pr_num)*: \($merged_pr_title)"
+                    "text": "Documentation has been automatically updated based on:\n• *PR #\($merged_pr_num)*: \($merged_pr_title)"
                   }
                 },
                 {
@@ -181,17 +210,55 @@ jobs:
           TEMP_RESPONSE=$(mktemp)
           trap "rm -f '$TEMP_RESPONSE'" EXIT
 
-          # Send Slack notification with error handling
-          HTTP_CODE=$(curl -s -w "%{http_code}" -o "$TEMP_RESPONSE" \
-            -X POST "$SLACK_WEBHOOK" \
-            -H "Content-Type: application/json" \
-            -d "$SLACK_PAYLOAD")
+          if [ "$USE_OAUTH" = true ]; then
+            # Use Slack OAuth token with chat.postMessage API
+            # Add channel to payload
+            SLACK_PAYLOAD=$(echo "$SLACK_PAYLOAD" | jq --arg channel "$SLACK_CHANNEL_ID" '. + {channel: $channel}')
 
-          if [ "$HTTP_CODE" = "200" ]; then
-            echo "📢 Slack notification sent successfully" >> $GITHUB_STEP_SUMMARY
+            # Validate channel ID format
+            if [[ ! "$SLACK_CHANNEL_ID" =~ ^C[A-Z0-9]{8,10}$ ]]; then
+              echo "⚠️ Warning: Invalid Slack channel ID format: $SLACK_CHANNEL_ID" >> $GITHUB_STEP_SUMMARY
+              exit 0
+            fi
+
+            # Send message using Slack API
+            HTTP_CODE=$(curl -s -w "%{http_code}" -o "$TEMP_RESPONSE" \
+              -X POST "https://slack.com/api/chat.postMessage" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $SLACK_OAUTH_TOKEN" \
+              -d "$SLACK_PAYLOAD")
+
+            # Check response
+            if [ "$HTTP_CODE" = "200" ]; then
+              API_OK=$(cat "$TEMP_RESPONSE" | jq -r '.ok' 2>/dev/null || echo "false")
+              if [ "$API_OK" = "true" ]; then
+                echo "📢 Slack notification sent successfully via OAuth" >> $GITHUB_STEP_SUMMARY
+              else
+                API_ERROR=$(cat "$TEMP_RESPONSE" | jq -r '.error' 2>/dev/null || echo "unknown")
+                echo "⚠️ Warning: Slack API error: $API_ERROR" >> $GITHUB_STEP_SUMMARY
+              fi
+            else
+              echo "⚠️ Warning: Failed to send Slack notification (HTTP $HTTP_CODE)" >> $GITHUB_STEP_SUMMARY
+            fi
           else
-            echo "⚠️ Warning: Failed to send Slack notification (HTTP $HTTP_CODE)" >> $GITHUB_STEP_SUMMARY
-            # Don't fail the workflow on notification failure
+            # Use legacy webhook method
+            # Validate webhook URL format
+            if [[ ! "$SLACK_WEBHOOK" =~ ^https://hooks\.slack\.com/services/ ]]; then
+              echo "⚠️ Warning: Invalid Slack webhook URL format, skipping notification" >> $GITHUB_STEP_SUMMARY
+              exit 0
+            fi
+
+            # Send notification via webhook
+            HTTP_CODE=$(curl -s -w "%{http_code}" -o "$TEMP_RESPONSE" \
+              -X POST "$SLACK_WEBHOOK" \
+              -H "Content-Type: application/json" \
+              -d "$SLACK_PAYLOAD")
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "📢 Slack notification sent successfully via webhook" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "⚠️ Warning: Failed to send Slack notification (HTTP $HTTP_CODE)" >> $GITHUB_STEP_SUMMARY
+            fi
           fi
 
       - name: ✅ Summary

@@ -1,0 +1,227 @@
+# ============================================================================
+# DocSync AI Workflow Example with @docbot Command Interface
+# ============================================================================
+# Place this file in your repository at: .github/workflows/docsync-ai.yml
+# ============================================================================
+
+name: 📚 DocSync AI Documentation
+
+on:
+  # Trigger 1: When a PR is merged to master/main
+  pull_request:
+    types: [closed]
+    branches:
+      - master  # Change to 'main' if your default branch is 'main'
+
+  # Trigger 2: When someone comments on a PR with @docbot or docsync:
+  issue_comment:
+    types: [created]
+
+# Required permissions
+permissions:
+  contents: write        # To create branches and push changes
+  pull-requests: write   # To create and update PRs
+
+jobs:
+  # ============================================================================
+  # JOB 1: Auto-create documentation PR when code PR is merged
+  # ============================================================================
+  docsync-on-merge:
+    name: 📚 Create Documentation PR
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+    uses: akash-deriv/shared-actions/.github/workflows/docsync-ai.yml@master
+    with:
+      trigger_type: 'merge'
+      base_branch: 'master'  # Change to 'main' if needed
+      pr_labels: 'documentation,automated,docsync-ai'
+
+      # ========================================================================
+      # Slack Notifications (OAuth Method - RECOMMENDED)
+      # ========================================================================
+      # This method uses centralized OAuth token stored in shared-actions repo
+      # More secure and easier to manage across multiple repositories
+      # ========================================================================
+      slack_channel_id: 'C01234567'    # REQUIRED: Your Slack channel ID (starts with C)
+      slack_user_id: 'U0AA8EH0QD8'     # OPTIONAL: User to mention (starts with U)
+
+      # ========================================================================
+      # Alternative: Legacy Webhook Method
+      # ========================================================================
+      # Uncomment the line below if you prefer using webhook instead of OAuth
+      # Note: When both are provided, OAuth takes precedence
+      # ========================================================================
+      # repository_owner: 'U0AA8EH0QD8'  # Legacy: Use slack_user_id instead
+
+    secrets:
+      DOCSYNC_GITHUB_TOKEN: ${{ secrets.DOCSYNC_GITHUB_TOKEN }}
+      DOCSYNC_ANTHROPIC_API_KEY: ${{ secrets.DOCSYNC_ANTHROPIC_API_KEY }}
+
+      # LEGACY WEBHOOK (Optional - only if not using OAuth method)
+      # DOCSYNC_SLACK_WEBHOOK: ${{ secrets.DOCSYNC_SLACK_WEBHOOK }}
+
+  # ============================================================================
+  # JOB 2: Update documentation based on PR comments (@docbot or docsync:)
+  # ============================================================================
+  # Supports both:
+  #   - New @docbot commands: @docbot update readme, @docbot clarify section, etc.
+  #   - Legacy docsync: format for backward compatibility
+  # ============================================================================
+  docsync-on-comment:
+    name: 💬 Update Documentation from Comment
+    if: |
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request != null &&
+      (startsWith(github.event.comment.body, '@docbot') || startsWith(github.event.comment.body, 'docsync:'))
+    uses: akash-deriv/shared-actions/.github/workflows/docsync-ai.yml@master
+    with:
+      trigger_type: 'comment'
+      base_branch: 'master'  # Change to 'main' if needed
+      comment_body: ${{ github.event.comment.body }}
+      comment_pr_number: ${{ github.event.issue.number }}
+    secrets:
+      DOCSYNC_GITHUB_TOKEN: ${{ secrets.DOCSYNC_GITHUB_TOKEN }}
+      DOCSYNC_ANTHROPIC_API_KEY: ${{ secrets.DOCSYNC_ANTHROPIC_API_KEY }}
+
+# ============================================================================
+# Slack Configuration Guide
+# ============================================================================
+#
+# METHOD 1: OAuth Token (Recommended) ✅
+# ----------------------------------------
+# Setup:
+# 1. In shared-actions repo (one-time setup):
+#    - Go to Settings > Secrets > Actions
+#    - Add: SLACK_OAUTH_TOKEN = xoxb-your-token-here
+#    - This token is automatically inherited by all consuming repos
+#
+# 2. Get your Slack IDs:
+#    a) Channel ID (starts with C):
+#       - Right-click channel → View channel details → Copy ID
+#       - Example: C01234ABCDE
+#
+#    b) User ID (starts with U):
+#       - Click profile → Profile → More → Copy member ID
+#       - Example: U0AA8EH0QD8
+#
+# 3. Add to workflow (above):
+#    slack_channel_id: 'C01234ABCDE'  # Required
+#    slack_user_id: 'U0AA8EH0QD8'     # Optional (for @mentions)
+#
+# Benefits:
+# ✅ Centralized token management
+# ✅ Easy rotation and updates
+# ✅ Proper user mentions with IDs
+# ✅ Multi-channel support per repo
+# ✅ More secure
+#
+# ----------------------------------------
+# METHOD 2: Webhook (Legacy) ⚠️
+# ----------------------------------------
+# Setup:
+# 1. Create webhook: https://api.slack.com/messaging/webhooks
+# 2. Add to your repo secrets:
+#    Settings > Secrets > Actions
+#    Add: DOCSYNC_SLACK_WEBHOOK = https://hooks.slack.com/services/...
+# 3. Uncomment in workflow:
+#    DOCSYNC_SLACK_WEBHOOK: ${{ secrets.DOCSYNC_SLACK_WEBHOOK }}
+#
+# Note: When both methods are configured, OAuth takes precedence
+#
+# ============================================================================
+
+# ============================================================================
+# How to Use the @docbot Command Interface
+# ============================================================================
+#
+# Once a documentation PR is created, you can interact with it using @docbot commands:
+#
+# UPDATE COMMANDS:
+#   @docbot update readme              - Update README.md with improvements
+#   @docbot update claude              - Update CLAUDE.md with technical details
+#   @docbot clarify <section>          - Make a section clearer
+#   @docbot add example for <feature>  - Add code examples
+#   @docbot expand <topic>             - Expand documentation on a topic
+#   @docbot fix <issue>                - Fix specific documentation issues
+#
+# APPROVAL COMMANDS:
+#   @docbot approve                    - Apply proposed changes
+#   @docbot reject                     - Discard proposed changes
+#
+# REVERT COMMANDS:
+#   @docbot revert last change         - Undo the most recent change
+#   @docbot revert to abc1234          - Revert to a specific commit
+#
+# LEGACY FORMAT (still supported):
+#   docsync: Add installation instructions for Windows users
+#
+# ============================================================================
+# Features
+# ============================================================================
+#
+# ✨ Automatic Documentation:
+#    - Analyzes PR changes automatically when merged
+#    - Creates documentation PR only for significant changes
+#    - Updates both README.md and CLAUDE.md intelligently
+#
+# 🎯 @docbot Commands:
+#    - Structured command interface with clear syntax
+#    - 9 different command types for specific actions
+#    - AI-powered parsing and intelligent execution
+#    - Approval workflow for review before committing
+#
+# 🔄 Revert Capability:
+#    - Easily undo changes with revert commands
+#    - Revert to last change or specific commit
+#    - Complete error handling with user feedback
+#
+# 📋 Auto-Guide:
+#    - Each DocSync PR gets a comment with all available commands
+#    - Examples and tips for better results
+#    - Interactive help for users
+#
+# 🔔 Slack Notifications:
+#    - OAuth token method for centralized management
+#    - User mentions with proper Slack IDs
+#    - Multi-channel support per repository
+#    - Legacy webhook support for backward compatibility
+#
+# 🔒 Security:
+#    - Input validation and sanitization
+#    - Only modifies documentation files
+#    - Validates PRs and permissions
+#    - All actions are reviewable before merge
+#    - Approval required before committing changes
+#
+# ============================================================================
+# Setup Requirements
+# ============================================================================
+#
+# 1. Create GitHub Secrets in YOUR REPOSITORY:
+#    Go to: Settings > Secrets and variables > Actions
+#
+#    Required:
+#    - DOCSYNC_GITHUB_TOKEN: PAT with 'repo' and 'workflow' scopes
+#      Get it: https://github.com/settings/tokens/new
+#
+#    - DOCSYNC_ANTHROPIC_API_KEY: Anthropic API key for Claude
+#      Get it: https://console.anthropic.com/
+#
+#    Optional (Legacy):
+#    - DOCSYNC_SLACK_WEBHOOK: For Slack notifications (webhook method)
+#      Get it: https://api.slack.com/messaging/webhooks
+#
+# 2. Slack Setup (OAuth Method - Recommended):
+#    In SHARED-ACTIONS repository:
+#    - Add SLACK_OAUTH_TOKEN secret (one-time setup)
+#
+#    In YOUR repository:
+#    - Get Channel ID and User ID (see guide above)
+#    - Add them as inputs in the workflow (lines 31-32)
+#
+# 3. Adjust Configuration:
+#    - Change 'master' to 'main' if that's your default branch
+#    - Modify pr_labels if you want different labels
+#    - Set slack_channel_id for notifications
+#    - Set slack_user_id for @mentions (optional)
+#
+# ============================================================================
