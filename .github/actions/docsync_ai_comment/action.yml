@@ -842,32 +842,8 @@ runs:
           # Switch back to PR branch
           git checkout -
 
-          # Get diff for display and format with visual indicators
-          RAW_DIFF=$(git diff --unified=1 --no-color "origin/$REVIEW_BRANCH"^.."origin/$REVIEW_BRANCH")
-
-          # Process diff to add emoji indicators and format for better visibility
-          DIFF_OUTPUT=""
-          while IFS= read -r line; do
-            if [[ "$line" =~ ^diff\ --git ]]; then
-              # File header
-              DIFF_OUTPUT+="**${line#diff --git }**\n"
-            elif [[ "$line" =~ ^--- || "$line" =~ ^\+\+\+ || "$line" =~ ^@@ ]]; then
-              # Skip metadata lines
-              continue
-            elif [[ "$line" =~ ^-[^-] ]]; then
-              # Deletion line (add red indicator)
-              DIFF_OUTPUT+="🔴 \`${line}\`\n"
-            elif [[ "$line" =~ ^\+[^+] ]]; then
-              # Addition line (add green indicator)
-              DIFF_OUTPUT+="🟢 \`${line}\`\n"
-            elif [[ "$line" =~ ^[[:space:]] ]]; then
-              # Context line
-              DIFF_OUTPUT+="   \`${line}\`\n"
-            fi
-          done <<< "$RAW_DIFF"
-
-          # Limit size
-          DIFF_OUTPUT=$(echo -e "$DIFF_OUTPUT" | head -c 4000)
+          # Get diff - show only changed lines (+ and -)
+          DIFF_OUTPUT=$(git diff --unified=0 --no-color "origin/$REVIEW_BRANCH"^.."origin/$REVIEW_BRANCH" | grep -E '^\+[^+]|^-[^-]' | head -c 4000)
 
           # Get list of changed files
           CHANGED_FILES=$(git diff --name-only "origin/$REVIEW_BRANCH"^.."origin/$REVIEW_BRANCH" | sed 's/^/- /')
@@ -884,7 +860,9 @@ runs:
             \($files)
 
             ### 🔍 Proposed Changes:
+            ```diff
             \($diff)
+            ```
 
             ### ✅ Approve or Reject
 
