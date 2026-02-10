@@ -110,6 +110,14 @@ runs:
               echo "command_is_revert=true" >> $GITHUB_OUTPUT
               SUGGESTION="REVERT: $COMMAND_TARGET"
               ;;
+            approve)
+              echo "command_is_approve=true" >> $GITHUB_OUTPUT
+              SUGGESTION="APPROVE"
+              ;;
+            reject)
+              echo "command_is_reject=true" >> $GITHUB_OUTPUT
+              SUGGESTION="REJECT"
+              ;;
             *)
               SUGGESTION="$COMMAND_TEXT"
               ;;
@@ -405,9 +413,112 @@ runs:
           gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
         fi
 
+    - name: ✅ Handle Approve Command
+      id: handle-approve
+      if: steps.verify-pr.outputs.is_docsync_pr == 'true' && steps.validate.outputs.command_is_approve == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+      run: |
+        set -e
+
+        echo "## ✅ Processing Approve Command" >> $GITHUB_STEP_SUMMARY
+
+        # Check if there's a pending review branch
+        REVIEW_BRANCH="docsync-review-$PR_NUMBER"
+
+        if git ls-remote --heads origin "$REVIEW_BRANCH" | grep -q "$REVIEW_BRANCH"; then
+          echo "Found pending review branch: $REVIEW_BRANCH" >> $GITHUB_STEP_SUMMARY
+
+          # Fetch and merge the review branch
+          git fetch origin "$REVIEW_BRANCH"
+          git merge "origin/$REVIEW_BRANCH" -m "📚 DocSync AI: Apply approved changes"
+          git push origin HEAD
+
+          # Delete the review branch
+          git push origin --delete "$REVIEW_BRANCH"
+
+          COMMENT_BODY=$(jq -n '"✅ **Changes Approved and Applied**
+
+          The proposed documentation changes have been approved and committed to this PR.
+
+          ---
+          🤖 *Automated by DocSync AI*"
+          ' -r)
+
+          gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
+
+          echo "approved=true" >> $GITHUB_OUTPUT
+          echo "✅ Successfully applied approved changes" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ No pending changes to approve" >> $GITHUB_STEP_SUMMARY
+          echo "approved=false" >> $GITHUB_OUTPUT
+
+          COMMENT_BODY=$(jq -n '"❌ **No Pending Changes**
+
+          There are no pending changes to approve.
+
+          Documentation changes are shown for review before being applied. Please wait for a documentation update to be generated first.
+
+          ---
+          🤖 *Automated by DocSync AI*"
+          ' -r)
+
+          gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
+        fi
+
+    - name: ❌ Handle Reject Command
+      id: handle-reject
+      if: steps.verify-pr.outputs.is_docsync_pr == 'true' && steps.validate.outputs.command_is_reject == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+      run: |
+        set -e
+
+        echo "## ❌ Processing Reject Command" >> $GITHUB_STEP_SUMMARY
+
+        # Check if there's a pending review branch
+        REVIEW_BRANCH="docsync-review-$PR_NUMBER"
+
+        if git ls-remote --heads origin "$REVIEW_BRANCH" | grep -q "$REVIEW_BRANCH"; then
+          echo "Found pending review branch: $REVIEW_BRANCH" >> $GITHUB_STEP_SUMMARY
+
+          # Delete the review branch without merging
+          git push origin --delete "$REVIEW_BRANCH"
+
+          COMMENT_BODY=$(jq -n '"❌ **Changes Rejected**
+
+          The proposed documentation changes have been rejected and discarded.
+
+          ---
+          🤖 *Automated by DocSync AI*"
+          ' -r)
+
+          gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
+
+          echo "rejected=true" >> $GITHUB_OUTPUT
+          echo "✅ Successfully rejected proposed changes" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ No pending changes to reject" >> $GITHUB_STEP_SUMMARY
+          echo "rejected=false" >> $GITHUB_OUTPUT
+
+          COMMENT_BODY=$(jq -n '"❌ **No Pending Changes**
+
+          There are no pending changes to reject.
+
+          ---
+          🤖 *Automated by DocSync AI*"
+          ' -r)
+
+          gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
+        fi
+
     - name: 🤖 Run Claude 3.7 Sonnet Documentation Analysis
       id: claude-analysis
-      if: steps.verify-pr.outputs.is_docsync_pr == 'true' && steps.handle-revert.outputs.reverted != 'true'
+      if: steps.verify-pr.outputs.is_docsync_pr == 'true' && steps.handle-revert.outputs.reverted != 'true' && steps.handle-approve.outputs.approved != 'true' && steps.handle-reject.outputs.rejected != 'true'
       shell: bash
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
@@ -668,8 +779,8 @@ runs:
           echo "⚠️ No documentation updates were applied" >> $GITHUB_STEP_SUMMARY
         fi
 
-    - name: 💾 Commit Changes to PR
-      id: commit-changes
+    - name: 📋 Show Changes for Approval
+      id: show-changes
       if: steps.claude-analysis.outputs.skip_analysis != 'true'
       shell: bash
       env:
@@ -682,10 +793,10 @@ runs:
         git add -A
 
         if git diff --cached --quiet; then
-          echo "updated=false" >> $GITHUB_OUTPUT
+          echo "has_changes=false" >> $GITHUB_OUTPUT
           echo "✅ No documentation updates needed" >> $GITHUB_STEP_SUMMARY
         else
-          echo "updated=true" >> $GITHUB_OUTPUT
+          echo "has_changes=true" >> $GITHUB_OUTPUT
           echo "📝 Documentation updates detected" >> $GITHUB_STEP_SUMMARY
 
           # Show what changed
@@ -709,48 +820,57 @@ runs:
             echo "❌ ERROR: Non-documentation files were modified:$INVALID_FILES" >> $GITHUB_STEP_SUMMARY
             echo "Only README.md and CLAUDE.md (any casing) should be updated." >> $GITHUB_STEP_SUMMARY
             git reset --hard
-            echo "updated=false" >> $GITHUB_OUTPUT
+            echo "has_changes=false" >> $GITHUB_OUTPUT
             exit 1
           fi
 
-          # Commit changes with secure git config
+          # Configure git
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Verify configuration was set
-          CONFIGURED_NAME=$(git config --local user.name)
-          if [ "$CONFIGURED_NAME" != "github-actions[bot]" ]; then
-            echo "❌ Failed to set git user configuration" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
+          # Create review branch
+          REVIEW_BRANCH="docsync-review-$PR_NUMBER"
 
-          # Validate PR number for commit message
-          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
-            echo "❌ Invalid PR number for commit" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
+          # Delete old review branch if it exists
+          git push origin --delete "$REVIEW_BRANCH" 2>/dev/null || true
 
-          # Create commit with safe message
-          git commit -m "📚 DocSync AI: Apply user suggestion from comment
+          # Create and push to review branch
+          git checkout -b "$REVIEW_BRANCH"
+          git commit -m "📚 DocSync AI: Proposed documentation changes (pending approval)"
+          git push origin "$REVIEW_BRANCH"
 
-          Applied documentation updates based on user comment.
+          # Switch back to PR branch
+          git checkout -
 
-          Generated by DocSync AI"
+          # Get diff for display (limit size)
+          DIFF_OUTPUT=$(git diff "origin/$REVIEW_BRANCH"^.."origin/$REVIEW_BRANCH" | head -c 4000)
 
-          git push origin HEAD
+          # Get list of changed files
+          CHANGED_FILES=$(git diff --name-only "origin/$REVIEW_BRANCH"^.."origin/$REVIEW_BRANCH" | sed 's/^/- /')
 
-          # Get list of changed files for comment
-          CHANGED_FILES=$(git diff HEAD~1 --name-only | head -10 | sed 's/^/- /')
-
-          # Add confirmation comment to PR using safe format
+          # Post review comment with diff
           COMMENT_BODY=$(jq -n \
             --arg files "$CHANGED_FILES" \
-            '"✅ **DocSync AI Update Applied**
+            --arg diff "$DIFF_OUTPUT" \
+            '"## 📋 Documentation Changes Ready for Review
 
-            Your documentation suggestion has been applied and committed to this PR.
+            The following documentation changes have been generated based on your request.
 
-            📝 **Updated Files:**
+            ### 📝 Changed Files:
             \($files)
+
+            ### 🔍 Proposed Changes:
+            ```diff
+            \($diff)
+            ```
+
+            ### ✅ Approve or Reject
+
+            Please review the changes above and:
+            - Comment `@docbot approve` to apply these changes
+            - Comment `@docbot reject` to discard these changes
+
+            The changes are waiting on a temporary branch and will only be applied after your approval.
 
             ---
             🤖 *Automated by DocSync AI*"
@@ -759,7 +879,7 @@ runs:
           gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
 
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### ✅ Changes Committed and Comment Added" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Changes Shown for Review" >> $GITHUB_STEP_SUMMARY
         fi
 
     - name: 📊 Summary
@@ -768,10 +888,16 @@ runs:
       env:
         VALID: ${{ steps.validate.outputs.valid }}
         IS_DOCSYNC: ${{ steps.verify-pr.outputs.is_docsync_pr }}
-        UPDATED: ${{ steps.commit-changes.outputs.updated }}
+        HAS_CHANGES: ${{ steps.show-changes.outputs.has_changes }}
+        APPROVED: ${{ steps.handle-approve.outputs.approved }}
+        REJECTED: ${{ steps.handle-reject.outputs.rejected }}
+        REVERTED: ${{ steps.handle-revert.outputs.reverted }}
       run: |
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "## 📊 Action Summary" >> $GITHUB_STEP_SUMMARY
         echo "- **Comment Valid**: ${VALID:-false}" >> $GITHUB_STEP_SUMMARY
         echo "- **Is DocSync PR**: ${IS_DOCSYNC:-false}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Documentation Updated**: ${UPDATED:-false}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Changes Generated**: ${HAS_CHANGES:-false}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Changes Approved**: ${APPROVED:-false}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Changes Rejected**: ${REJECTED:-false}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Changes Reverted**: ${REVERTED:-false}" >> $GITHUB_STEP_SUMMARY

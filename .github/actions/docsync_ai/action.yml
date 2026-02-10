@@ -691,6 +691,17 @@ runs:
         Fixes a specific issue in the documentation.
         **Example:** `@docbot fix typo in configuration section`
 
+        #### **Approval Commands**
+        ```
+        @docbot approve
+        ```
+        Approves and applies proposed documentation changes.
+
+        ```
+        @docbot reject
+        ```
+        Rejects and discards proposed documentation changes.
+
         #### **Revert Commands**
         ```
         @docbot revert last change
@@ -709,8 +720,9 @@ runs:
 
         1. **Comment with a command** — Simply post a comment starting with `@docbot` followed by your instruction
         2. **AI processes your request** — Claude AI analyzes your command and the current documentation
-        3. **Changes are committed automatically** — Updates are applied and committed directly to this PR
-        4. **You get notified** — A confirmation comment shows what was changed
+        3. **Review proposed changes** — A diff is shown for your review before any changes are committed
+        4. **Approve or reject** — Comment `@docbot approve` to apply or `@docbot reject` to discard
+        5. **You get notified** — A confirmation comment shows what was changed
 
         ### 🎯 Example Usage
 

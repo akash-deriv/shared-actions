@@ -110,6 +110,8 @@ On any DocSync AI PR, use the **@docbot command interface** for controlled docum
 @docbot add example for API authentication
 @docbot expand installation steps
 @docbot fix typo in configuration section
+@docbot approve          # Approve proposed changes
+@docbot reject           # Reject proposed changes
 @docbot revert last change
 ```
 
@@ -121,6 +123,7 @@ docsync: Add installation instructions for Windows users
 **Features:**
 - ✨ **Structured commands** - Clear, predictable interface (`@docbot <action> <target>`)
 - 🎯 **Specific actions** - Update, clarify, add examples, expand, fix, or revert
+- 👀 **Approval workflow** - Review changes before they're committed with `@docbot approve/reject`
 - 🔄 **Revert capability** - Undo changes with `@docbot revert last change`
 - 📋 **Auto-guide** - Each DocSync PR includes a comment with all available commands
 - 🤖 **AI-powered** - Claude analyzes context and applies changes intelligently
@@ -130,15 +133,16 @@ docsync: Add installation instructions for Windows users
 - Only works on DocSync-generated PRs (with `docsync-ai` or `automated` labels)
 - AI makes the final decision - may reject, modify, or improve suggestions
 - Provides quality control and sanitization of user input
-- All changes are committed automatically and reviewable before merge
+- Changes require explicit approval before being committed (safer workflow)
 
 ### How It Works
 
 1. **Merge Trigger**: When PR merges → AI analyzes diff → Creates doc PR if significant changes detected → Posts @docbot usage guide
-2. **Comment Trigger**: When user comments `@docbot <command>` → AI parses command → Applies changes → Commits to PR
-3. **AI Decision Making**: Claude AI evaluates all suggestions and makes expert decisions on documentation quality
-4. **Safety**: Validates PRs, sanitizes input, only modifies documentation files
-5. **Revert Support**: Can undo changes with `@docbot revert last change` for easy rollback
+2. **Comment Trigger**: When user comments `@docbot <command>` → AI parses command → Generates changes → Shows diff for review
+3. **Approval Workflow**: User reviews diff → Comments `@docbot approve` to apply or `@docbot reject` to discard → Changes are only committed after approval
+4. **AI Decision Making**: Claude AI evaluates all suggestions and makes expert decisions on documentation quality
+5. **Safety**: Validates PRs, sanitizes input, only modifies documentation files, requires approval before committing
+6. **Revert Support**: Can undo changes with `@docbot revert last change` for easy rollback
 
 See [example-docsync-workflow.yml](example-docsync-workflow.yml) for a complete configuration example with detailed comments.
 
