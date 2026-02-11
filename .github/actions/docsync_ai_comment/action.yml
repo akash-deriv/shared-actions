@@ -263,7 +263,7 @@ runs:
         set -e
 
         echo "## Claude Sonnet 4.5 Analysis" >> $GITHUB_STEP_SUMMARY
-        echo "Model: claude-sonnet-4-5-latest" >> $GITHUB_STEP_SUMMARY
+        echo "Model: claude-sonnet-4-5" >> $GITHUB_STEP_SUMMARY
 
         # Create secure temporary directory
         TEMP_DIR=$(mktemp -d -t docsync-comment-XXXXXXXXXX)
@@ -592,7 +592,7 @@ runs:
           # Create secure request body file
           REQUEST_FILE="$TEMP_DIR/request_$(openssl rand -hex 8).json"
           jq -n \
-            --arg model "claude-sonnet-4-5-latest" \
+            --arg model "claude-sonnet-4-5" \
             --argjson max_tokens 8192 \
             --arg content "$FULL_PROMPT" \
             '{
