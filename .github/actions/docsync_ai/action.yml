@@ -117,7 +117,7 @@ runs:
         PR_SUMMARY=""
         COMBINED_DIFF=""
         ALL_CHANGED_FILES=""
-        MAX_DIFF_SIZE=1048576  # 1MB total budget for combined diffs
+        MAX_DIFF_SIZE=104857600  # 100MB total budget for combined diffs
         CURRENT_DIFF_SIZE=0
 
         # Save PR list for later reference
@@ -326,7 +326,7 @@ runs:
 
         # Validate diff size
         DIFF_SIZE=${#PR_DIFF}
-        MAX_DIFF_SIZE=1048576  # 1MB
+        MAX_DIFF_SIZE=104857600  # 100MB
         if [ $DIFF_SIZE -gt $MAX_DIFF_SIZE ]; then
           echo "Combined PR diff too large, truncating..." >> $GITHUB_STEP_SUMMARY
           PR_DIFF="${PR_DIFF:0:$MAX_DIFF_SIZE}"
@@ -462,17 +462,20 @@ runs:
            - Start directly with the documentation content
 
         6. **SIGNIFICANCE CHECK**:
-           - Only update for significant changes: new features, major fixes, API changes, new dependencies, workflow changes
-           - Skip minor changes: typos, code formatting, small refactors, comment updates
+           - UPDATE documentation for: new files/modules, new features, API changes, new dependencies, configuration changes, new functionality, data structures, workflow changes
+           - ALSO consider: multiple small changes that collectively add up to meaningful updates
+           - Skip ONLY: isolated typos, minor code comments, whitespace formatting
+           - When in doubt, UPDATE - it's better to document changes than miss them
            - Consider the COMBINED impact of all PRs from the week
 
         ## Decision Process:
 
         1. Verify these PRs are for the project "'"$PROJECT_TITLE"'" in repository "'"$REPO_NAME"'"
-        2. Analyze what changed across ALL merged PRs
-        3. Determine if those combined changes require documentation updates
-        4. If yes: Add new information to relevant sections WITHOUT removing existing content
-        5. If no: Output exactly "NO_UPDATES_NEEDED"
+        2. Carefully analyze what changed across ALL merged PRs in the diffs
+        3. Check if ANY new files, modules, functions, or features were added
+        4. Look for changes to existing functionality that users should know about
+        5. If ANY of the above exist: Add new information to relevant sections WITHOUT removing existing content
+        6. ONLY output "NO_UPDATES_NEEDED" if the changes are truly insignificant (like pure formatting)
 
         ## Response:
         - If significant, relevant updates are needed: Output the COMPLETE updated documentation (with additions only)
@@ -491,7 +494,7 @@ runs:
           REQUEST_FILE="$TEMP_DIR/request_$(openssl rand -hex 8).json"
           jq -n \
             --arg model "claude-sonnet-4-5" \
-            --argjson max_tokens 8192 \
+            --argjson max_tokens 16384 \
             --arg content "$FULL_PROMPT" \
             '{
               model: $model,
