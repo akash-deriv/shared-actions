@@ -1,4 +1,4 @@
-name: 📚 DocSync AI - Documentation Sync
+name: DocSync AI - Documentation Sync
 
 on:
   workflow_call:
@@ -13,33 +13,18 @@ on:
         required: false
         default: 'documentation,automated'
         type: string
-      slack_webhook_url:
-        description: 'Slack webhook URL for notifications (optional, legacy support)'
-        required: false
-        default: ''
-        type: string
-      repository_owner:
-        description: 'Repository owner name for Slack notifications (legacy, use slack_user_id instead)'
-        required: false
-        default: ''
-        type: string
       slack_channel_id:
-        description: 'Slack channel ID for notifications (e.g., C01234567)'
-        required: false
-        default: ''
-        type: string
-      slack_user_id:
-        description: 'Slack user ID to mention in notifications (e.g., U01234567)'
+        description: 'Slack channel ID to post notifications (e.g., C01234ABCDE)'
         required: false
         default: ''
         type: string
       trigger_type:
-        description: 'Trigger type: "merge" for PR merge, "comment" for PR comment'
+        description: 'Trigger type: "scheduled" for weekly cron, "comment" for PR comment'
         required: false
-        default: 'merge'
+        default: 'scheduled'
         type: string
       comment_body:
-        description: 'Comment body (only for comment trigger, must start with "@docbot" or "docsync:")'
+        description: 'Comment body (only for comment trigger, must start with "docsync:")'
         required: false
         default: ''
         type: string
@@ -55,11 +40,8 @@ on:
       DOCSYNC_ANTHROPIC_API_KEY:
         description: 'Anthropic API key for Claude AI'
         required: true
-      DOCSYNC_SLACK_WEBHOOK:
-        description: 'Slack webhook URL for notifications (optional, legacy support)'
-        required: false
-      SLACK_OAUTH_TOKEN:
-        description: 'Slack OAuth token from shared-actions repo (automatically provided)'
+      DOCSYNC_SLACK_TOKEN:
+        description: 'Slack OAuth bot token for notifications (xoxb-...)'
         required: false
 
 concurrency:
@@ -68,11 +50,11 @@ concurrency:
 
 jobs:
   sync-documentation:
-    name: 📚 Sync Documentation
+    name: Sync Documentation (Weekly)
     runs-on: ubuntu-latest
 
-    # Only run when a PR is merged to the base branch
-    if: github.event.pull_request.merged == true
+    # Only run when trigger_type is 'scheduled'
+    if: inputs.trigger_type == 'scheduled'
 
     permissions:
       contents: write
@@ -86,163 +68,124 @@ jobs:
     env:
       BASE_BRANCH: ${{ inputs.base_branch }}
       PR_LABELS: ${{ inputs.pr_labels }}
-      SLACK_WEBHOOK: ${{ inputs.slack_webhook_url || secrets.DOCSYNC_SLACK_WEBHOOK }}
-      SLACK_OAUTH_TOKEN: ${{ secrets.SLACK_OAUTH_TOKEN }}
-      SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
-      SLACK_USER_ID: ${{ inputs.slack_user_id }}
-      REPO_OWNER: ${{ inputs.repository_owner }}
+      SLACK_TOKEN: ${{ secrets.DOCSYNC_SLACK_TOKEN }}
+      SLACK_CHANNEL: ${{ inputs.slack_channel_id }}
 
     steps:
-      - name: 🔍 Debug - Workflow Trigger Info
+      - name: Debug - Workflow Trigger Info
         run: |
-          echo "## 🔍 Workflow Trigger Info" >> $GITHUB_STEP_SUMMARY
+          echo "## Workflow Trigger Info" >> $GITHUB_STEP_SUMMARY
           echo "Event: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "Action: ${{ github.event.action }}" >> $GITHUB_STEP_SUMMARY
-          echo "PR Merged: ${{ github.event.pull_request.merged }}" >> $GITHUB_STEP_SUMMARY
-          echo "PR Number: ${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
-          echo "PR Title: ${{ github.event.pull_request.title }}" >> $GITHUB_STEP_SUMMARY
+          echo "Trigger Type: ${{ inputs.trigger_type }}" >> $GITHUB_STEP_SUMMARY
           echo "Base Branch: ${{ inputs.base_branch }}" >> $GITHUB_STEP_SUMMARY
           echo "Repository: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
 
-      - name: 📥 Checkout Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.DOCSYNC_GITHUB_TOKEN }}
           ref: ${{ inputs.base_branch }}
 
-      - name: 🤖 Run DocSync AI Action
+      - name: Run DocSync AI Action
         id: docsync
         uses: akash-deriv/shared-actions/.github/actions/docsync_ai@master
         with:
           github_token: ${{ secrets.DOCSYNC_GITHUB_TOKEN }}
           anthropic_api_key: ${{ secrets.DOCSYNC_ANTHROPIC_API_KEY }}
           repository: ${{ github.repository }}
-          pr_number: ${{ github.event.pull_request.number }}
-          pr_title: ${{ github.event.pull_request.title }}
-          pr_body: ${{ github.event.pull_request.body }}
           base_branch: ${{ inputs.base_branch }}
           pr_labels: ${{ inputs.pr_labels }}
 
-      - name: 📢 Send Slack Notification - Documentation PR Created
-        if: steps.docsync.outputs.doc_pr_created == 'true' && (env.SLACK_OAUTH_TOKEN != '' || env.SLACK_WEBHOOK != '')
+      - name: Send Slack Notification - Documentation PR Created
+        if: steps.docsync.outputs.doc_pr_created == 'true' && env.SLACK_TOKEN != '' && env.SLACK_CHANNEL != ''
         env:
           DOC_PR_NUMBER: ${{ steps.docsync.outputs.doc_pr_number }}
           DOC_PR_URL: ${{ steps.docsync.outputs.doc_pr_url }}
-          MERGED_PR_NUMBER: ${{ github.event.pull_request.number }}
-          MERGED_PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -e
 
+          # Validate Slack token format (should start with xoxb-)
+          if [[ ! "$SLACK_TOKEN" =~ ^xoxb- ]]; then
+            echo "Warning: Invalid Slack token format, skipping notification" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # Validate channel ID format (starts with C, T, or G followed by alphanumeric)
+          if [[ ! "$SLACK_CHANNEL" =~ ^[CTG][A-Z0-9]+$ ]]; then
+            echo "Warning: Invalid Slack channel ID format, skipping notification" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
           # Sanitize inputs for Slack message
-          MERGED_PR_TITLE_CLEAN=$(echo "$MERGED_PR_TITLE" | tr -d '\000-\037' | head -c 200)
           DOC_PR_URL_CLEAN=$(echo "$DOC_PR_URL" | head -c 500)
 
-          # Validate PR numbers
-          if ! [[ "$DOC_PR_NUMBER" =~ ^[0-9]+$ ]] || ! [[ "$MERGED_PR_NUMBER" =~ ^[0-9]+$ ]]; then
-            echo "⚠️ Warning: Invalid PR numbers, skipping notification" >> $GITHUB_STEP_SUMMARY
+          # Validate PR number
+          if ! [[ "$DOC_PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "Warning: Invalid PR number, skipping notification" >> $GITHUB_STEP_SUMMARY
             exit 0
           fi
 
-          # Determine which Slack method to use
-          USE_OAUTH=false
-          if [ -n "$SLACK_OAUTH_TOKEN" ] && [ -n "$SLACK_CHANNEL_ID" ]; then
-            USE_OAUTH=true
-            echo "Using Slack OAuth token method" >> $GITHUB_STEP_SUMMARY
-          elif [ -n "$SLACK_WEBHOOK" ]; then
-            echo "Using Slack webhook method (legacy)" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "⚠️ Warning: No Slack configuration found, skipping notification" >> $GITHUB_STEP_SUMMARY
-            exit 0
-          fi
-
-          # Format user mention for Slack
-          USER_MENTION=""
-          if [ -n "$SLACK_USER_ID" ]; then
-            USER_MENTION="<@$SLACK_USER_ID> "
-          elif [ -n "$REPO_OWNER" ]; then
-            # Legacy support: use REPO_OWNER if provided
-            REPO_OWNER_CLEAN=$(echo "$REPO_OWNER" | tr -d '\000-\037' | head -c 50)
-            USER_MENTION="<@$REPO_OWNER_CLEAN> "
-          fi
+          # Create Slack payload safely using jq
+          SLACK_PAYLOAD=$(jq -n \
+            --arg channel "$SLACK_CHANNEL" \
+            --arg repo "${{ github.repository }}" \
+            --arg doc_pr_url "$DOC_PR_URL_CLEAN" \
+            --arg doc_pr_num "$DOC_PR_NUMBER" \
+            '{
+              "channel": $channel,
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": ":book: *Weekly Documentation Update Ready*\n*<\($doc_pr_url)|PR #\($doc_pr_num)>* in `\($repo)`"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "Documentation has been automatically updated based on all PRs merged this week."
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "DocSync AI (Weekly Sync) | <\($doc_pr_url)|Review documentation updates>"
+                    }
+                  ]
+                }
+              ]
+            }')
 
           # Create temporary file for response
           TEMP_RESPONSE=$(mktemp)
           trap "rm -f '$TEMP_RESPONSE'" EXIT
 
-          if [ "$USE_OAUTH" = true ]; then
-            # Use Slack OAuth token with chat.postMessage API (simplified payload like Python script)
-            MESSAGE_TEXT="${USER_MENTION}📚 *Documentation Update Ready*
-            *PR #${DOC_PR_NUMBER}* in \`${{ github.repository }}\`
+          # Send Slack notification via API with OAuth token
+          HTTP_CODE=$(curl -s -w "%{http_code}" -o "$TEMP_RESPONSE" \
+            -X POST "https://slack.com/api/chat.postMessage" \
+            -H "Authorization: Bearer $SLACK_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$SLACK_PAYLOAD")
 
-            Documentation has been automatically updated based on:
-            • *PR #${MERGED_PR_NUMBER}*: ${MERGED_PR_TITLE_CLEAN}
-
-            🔗 Review: ${DOC_PR_URL_CLEAN}
-
-            🤖 DocSync AI"
-
-            # Create simple JSON payload (matching Python script structure)
-            SLACK_PAYLOAD=$(jq -n \
-              --arg channel "$SLACK_CHANNEL_ID" \
-              --arg text "$MESSAGE_TEXT" \
-              '{channel: $channel, text: $text}')
-
-            # Send message using Slack API
-            HTTP_CODE=$(curl -s -w "%{http_code}" -o "$TEMP_RESPONSE" \
-              -X POST "https://slack.com/api/chat.postMessage" \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer $SLACK_OAUTH_TOKEN" \
-              -d "$SLACK_PAYLOAD")
-
-            # Check response
-            if [ "$HTTP_CODE" = "200" ]; then
-              API_OK=$(cat "$TEMP_RESPONSE" | jq -r '.ok' 2>/dev/null || echo "false")
-              if [ "$API_OK" = "true" ]; then
-                echo "📢 Slack notification sent successfully via OAuth" >> $GITHUB_STEP_SUMMARY
-              else
-                API_ERROR=$(cat "$TEMP_RESPONSE" | jq -r '.error' 2>/dev/null || echo "unknown")
-                echo "⚠️ Warning: Slack API error: $API_ERROR" >> $GITHUB_STEP_SUMMARY
-                echo "Response: $(cat "$TEMP_RESPONSE")" >> $GITHUB_STEP_SUMMARY
-              fi
+          if [ "$HTTP_CODE" = "200" ]; then
+            # Check Slack API response for ok field
+            SLACK_OK=$(cat "$TEMP_RESPONSE" | jq -r '.ok' 2>/dev/null || echo "false")
+            if [ "$SLACK_OK" = "true" ]; then
+              echo "Slack notification sent successfully" >> $GITHUB_STEP_SUMMARY
             else
-              echo "⚠️ Warning: Failed to send Slack notification (HTTP $HTTP_CODE)" >> $GITHUB_STEP_SUMMARY
-              echo "Response: $(cat "$TEMP_RESPONSE")" >> $GITHUB_STEP_SUMMARY
+              SLACK_ERROR=$(cat "$TEMP_RESPONSE" | jq -r '.error // "unknown"' 2>/dev/null)
+              echo "Warning: Slack API returned error: $SLACK_ERROR" >> $GITHUB_STEP_SUMMARY
             fi
           else
-            # Use legacy webhook method
-            # Validate webhook URL format
-            if [[ ! "$SLACK_WEBHOOK" =~ ^https://hooks\.slack\.com/services/ ]]; then
-              echo "⚠️ Warning: Invalid Slack webhook URL format, skipping notification" >> $GITHUB_STEP_SUMMARY
-              exit 0
-            fi
-
-            # Create simple text message for webhook
-            MESSAGE_TEXT="${USER_MENTION}📚 *Documentation Update Ready*
-            *PR #${DOC_PR_NUMBER}* in \`${{ github.repository }}\`
-
-            Documentation has been automatically updated based on:
-            • *PR #${MERGED_PR_NUMBER}*: ${MERGED_PR_TITLE_CLEAN}
-
-            🔗 Review: ${DOC_PR_URL_CLEAN}
-
-            🤖 DocSync AI"
-
-            SLACK_PAYLOAD=$(jq -n --arg text "$MESSAGE_TEXT" '{text: $text}')
-
-            # Send notification via webhook
-            HTTP_CODE=$(curl -s -w "%{http_code}" -o "$TEMP_RESPONSE" \
-              -X POST "$SLACK_WEBHOOK" \
-              -H "Content-Type: application/json" \
-              -d "$SLACK_PAYLOAD")
-
-            if [ "$HTTP_CODE" = "200" ]; then
-              echo "📢 Slack notification sent successfully via webhook" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "⚠️ Warning: Failed to send Slack notification (HTTP $HTTP_CODE)" >> $GITHUB_STEP_SUMMARY
-            fi
+            echo "Warning: Failed to send Slack notification (HTTP $HTTP_CODE)" >> $GITHUB_STEP_SUMMARY
+            # Don't fail the workflow on notification failure
           fi
 
-      - name: ✅ Summary
+      - name: Summary
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}
@@ -252,13 +195,13 @@ jobs:
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Source PR | #${{ github.event.pull_request.number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trigger | Weekly Scheduled |" >> $GITHUB_STEP_SUMMARY
           echo "| Documentation PR Created | ${DOC_PR_CREATED:-false} |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | $JOB_STATUS |" >> $GITHUB_STEP_SUMMARY
           echo "| Base Branch | $BASE_BRANCH |" >> $GITHUB_STEP_SUMMARY
 
   update-from-comment:
-    name: 💬 Update Documentation from Comment
+    name: Update Documentation from Comment
     runs-on: ubuntu-latest
 
     # Only run when trigger_type is 'comment'
@@ -268,15 +211,19 @@ jobs:
       contents: write
       pull-requests: write
 
+    env:
+      SLACK_TOKEN: ${{ secrets.DOCSYNC_SLACK_TOKEN }}
+      SLACK_CHANNEL: ${{ inputs.slack_channel_id }}
+
     steps:
-      - name: 🔍 Debug - Comment Trigger Info
+      - name: Debug - Comment Trigger Info
         run: |
-          echo "## 🔍 Comment Trigger Info" >> $GITHUB_STEP_SUMMARY
+          echo "## Comment Trigger Info" >> $GITHUB_STEP_SUMMARY
           echo "Trigger Type: ${{ inputs.trigger_type }}" >> $GITHUB_STEP_SUMMARY
           echo "PR Number: ${{ inputs.comment_pr_number }}" >> $GITHUB_STEP_SUMMARY
           echo "Repository: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
 
-      - name: 🤖 Run DocSync AI Comment Action
+      - name: Run DocSync AI Comment Action
         id: docsync-comment
         uses: akash-deriv/shared-actions/.github/actions/docsync_ai_comment@master
         with:
@@ -287,7 +234,102 @@ jobs:
           comment_body: ${{ inputs.comment_body }}
           base_branch: ${{ inputs.base_branch }}
 
-      - name: ✅ Summary
+      - name: Send Slack Notification - Documentation Updated
+        if: steps.docsync-comment.outputs.updated == 'true' && env.SLACK_TOKEN != '' && env.SLACK_CHANNEL != ''
+        env:
+          COMMENT_PR_NUMBER: ${{ inputs.comment_pr_number }}
+          IS_DOCSYNC_PR: ${{ steps.docsync-comment.outputs.is_docsync_pr }}
+        run: |
+          set -e
+
+          # Validate Slack token format (should start with xoxb-)
+          if [[ ! "$SLACK_TOKEN" =~ ^xoxb- ]]; then
+            echo "Warning: Invalid Slack token format, skipping notification" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # Validate channel ID format
+          if [[ ! "$SLACK_CHANNEL" =~ ^[CTG][A-Z0-9]+$ ]]; then
+            echo "Warning: Invalid Slack channel ID format, skipping notification" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # Validate PR number
+          if ! [[ "$COMMENT_PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "Warning: Invalid PR number, skipping notification" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # Build PR URL
+          PR_URL="https://github.com/${{ github.repository }}/pull/$COMMENT_PR_NUMBER"
+
+          # Choose message based on PR type
+          if [ "$IS_DOCSYNC_PR" = "true" ]; then
+            UPDATE_TYPE="User suggestion applied to DocSync PR"
+          else
+            UPDATE_TYPE="Documentation updated from PR comment"
+          fi
+
+          # Create Slack payload safely using jq
+          SLACK_PAYLOAD=$(jq -n \
+            --arg channel "$SLACK_CHANNEL" \
+            --arg repo "${{ github.repository }}" \
+            --arg pr_url "$PR_URL" \
+            --arg pr_num "$COMMENT_PR_NUMBER" \
+            --arg update_type "$UPDATE_TYPE" \
+            '{
+              "channel": $channel,
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": ":memo: *Documentation Updated via Comment*\n*<\($pr_url)|PR #\($pr_num)>* in `\($repo)`"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "\($update_type)"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "DocSync AI | <\($pr_url)|View PR>"
+                    }
+                  ]
+                }
+              ]
+            }')
+
+          # Create temporary file for response
+          TEMP_RESPONSE=$(mktemp)
+          trap "rm -f '$TEMP_RESPONSE'" EXIT
+
+          # Send Slack notification via API with OAuth token
+          HTTP_CODE=$(curl -s -w "%{http_code}" -o "$TEMP_RESPONSE" \
+            -X POST "https://slack.com/api/chat.postMessage" \
+            -H "Authorization: Bearer $SLACK_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$SLACK_PAYLOAD")
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            SLACK_OK=$(cat "$TEMP_RESPONSE" | jq -r '.ok' 2>/dev/null || echo "false")
+            if [ "$SLACK_OK" = "true" ]; then
+              echo "Slack notification sent successfully" >> $GITHUB_STEP_SUMMARY
+            else
+              SLACK_ERROR=$(cat "$TEMP_RESPONSE" | jq -r '.error // "unknown"' 2>/dev/null)
+              echo "Warning: Slack API returned error: $SLACK_ERROR" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "Warning: Failed to send Slack notification (HTTP $HTTP_CODE)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Summary
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}
@@ -304,4 +346,3 @@ jobs:
           echo "| Is DocSync PR | ${IS_DOCSYNC_PR:-false} |" >> $GITHUB_STEP_SUMMARY
           echo "| Documentation Updated | ${UPDATED:-false} |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | $JOB_STATUS |" >> $GITHUB_STEP_SUMMARY
-
