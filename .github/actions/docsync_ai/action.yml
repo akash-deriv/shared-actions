@@ -364,119 +364,117 @@ runs:
             FORMAT_INSTRUCTION="This is a CLAUDE.md file for AI assistance. Maintain the technical, detailed format suitable for AI context with implementation details, architecture notes, and development guidelines. Keep the detailed, technical documentation style."
           fi
 
-          # Create secure prompt file
+          # Create secure prompt file using echo for proper variable expansion
+          # NOTE: heredoc with 'EOF' (quoted) does NOT expand variables - use echo instead
           PROMPT_FILE="$TEMP_DIR/claude_prompt_$(openssl rand -hex 8).txt"
-
-          # Build prompt with safe variable substitution
-          cat > "$PROMPT_FILE" << 'EOF'
-        You are a technical documentation expert tasked with updating documentation based on recent code changes from the past week.
-
-        ## IMPORTANT: PROJECT IDENTITY
-        This documentation is for: '"$PROJECT_TITLE"'
-        Repository: '"$REPO_NAME"'
-
-        **CRITICAL**: You MUST maintain the project identity. This is NOT a different project. Do NOT replace this documentation with content about any other project, library, or tool.
-
-        ## Context - Weekly PR Summary
-        The following PRs were merged to '"$BASE_BRANCH"' in the past week:
-        '"$PR_SUMMARY_CLEAN"'
-
-        ## Current Documentation Content:
-        ```
-        '"$DOC_CONTENT"'
-        ```
-
-        ## Combined PR Changes (Code Diffs from the past week):
-        ```diff
-        '"$PR_DIFF"'
-        ```
-
-        ## Repository Structure:
-        ```
-        '"$REPO_STRUCTURE"'
-        ```
-
-        ## ALL Changed Files Across Merged PRs (excluding workflow files):
-        These are ALL the files that were added, modified, or deleted across ALL merged PRs this week.
-        Pay special attention to NEW files - these likely represent new features or modules that MUST be documented.
-        ```
-        '"$CHANGED_FILES"'
-        ```
-
-        ## Format Requirements:
-        '"$FORMAT_INSTRUCTION"'
-
-        ## Additional Context:
-        '"$OTHER_FILES_NOTE"'
-
-        ## Your Task
-        Analyze ALL the merged PR changes from the past week and determine if the '"$DOC_FILE"' needs updates.
-
-        ## ABSOLUTE REQUIREMENTS - VIOLATION WILL BE REJECTED:
-
-        1. **PRESERVE PROJECT IDENTITY**:
-           - The project name "'"$PROJECT_TITLE"'" MUST remain unchanged
-           - Do NOT replace this with documentation for a different project
-           - Maintain all existing project-specific information
-
-        2. **ONLY ADD, NEVER REMOVE**:
-           - You may ONLY add new information based on PR changes
-           - NEVER remove existing sections, features, or content
-           - NEVER replace existing content with unrelated information
-           - Keep all existing headings, sections, and structure intact
-
-        3. **STAY RELEVANT TO PR CHANGES**:
-           - Only update sections directly related to the code changes in the PR diffs
-           - If PRs add features, document those features
-           - If PRs change behavior, update those specific behavior sections
-           - Do NOT make unrelated changes
-
-        4. **VERIFY PROJECT MATCH**:
-           - Cross-reference the PR diffs with the current documentation
-           - Ensure the technologies, frameworks, and tools mentioned in the PRs match those in the documentation
-           - If there's a mismatch, output NO_UPDATES_NEEDED
-
-        5. **OUTPUT FORMAT**:
-           - Output ONLY the complete updated documentation content
-           - NO preambles, acknowledgments, or explanatory text
-           - NO phrases like "Here's the updated", "I've analyzed", etc.
-           - Start directly with the documentation content
-
-        6. **SIGNIFICANCE CHECK**:
-           - UPDATE documentation for: new files/modules, new features, API changes, new dependencies, configuration changes, new functionality, data structures, workflow changes
-           - ALSO consider: multiple small changes that collectively add up to meaningful updates
-           - Skip ONLY: isolated typos, minor code comments, whitespace formatting
-           - When in doubt, UPDATE - it's better to document changes than miss them
-           - Consider the COMBINED impact of all PRs from the week
-
-        ## Decision Process:
-
-        1. Verify these PRs are for the project "'"$PROJECT_TITLE"'" in repository "'"$REPO_NAME"'"
-        2. Carefully analyze what changed across ALL merged PRs in the diffs
-        3. Check if ANY new files, modules, functions, or features were added
-        4. Look for changes to existing functionality that users should know about
-        5. If ANY of the above exist: Add new information to relevant sections WITHOUT removing existing content
-        6. ONLY output "NO_UPDATES_NEEDED" if the changes are truly insignificant (like pure formatting)
-
-        ## Response:
-        - If significant, relevant updates are needed: Output the COMPLETE updated documentation (with additions only)
-        - If no updates needed OR project mismatch detected: Output exactly: NO_UPDATES_NEEDED
-
-        Begin your response now:
-        EOF
+          {
+            echo "You are a technical documentation expert tasked with updating documentation based on recent code changes from the past week."
+            echo ""
+            echo "## IMPORTANT: PROJECT IDENTITY"
+            echo "This documentation is for: $PROJECT_TITLE"
+            echo "Repository: $REPO_NAME"
+            echo ""
+            echo "**CRITICAL**: You MUST maintain the project identity. This is NOT a different project. Do NOT replace this documentation with content about any other project, library, or tool."
+            echo ""
+            echo "## Context - Weekly PR Summary"
+            echo "The following PRs were merged to $BASE_BRANCH in the past week:"
+            echo "$PR_SUMMARY_CLEAN"
+            echo ""
+            echo "## Current Documentation Content:"
+            echo '```'
+            echo "$DOC_CONTENT"
+            echo '```'
+            echo ""
+            echo "## Combined PR Changes (Code Diffs from the past week):"
+            echo '```diff'
+            echo "$PR_DIFF"
+            echo '```'
+            echo ""
+            echo "## Repository Structure:"
+            echo '```'
+            echo "$REPO_STRUCTURE"
+            echo '```'
+            echo ""
+            echo "## ALL Changed Files Across Merged PRs (excluding workflow files):"
+            echo "These are ALL the files that were added, modified, or deleted across ALL merged PRs this week."
+            echo "Pay special attention to NEW files - these likely represent new features or modules that MUST be documented."
+            echo '```'
+            echo "$CHANGED_FILES"
+            echo '```'
+            echo ""
+            echo "## Format Requirements:"
+            echo "$FORMAT_INSTRUCTION"
+            echo ""
+            echo "## Additional Context:"
+            echo "$OTHER_FILES_NOTE"
+            echo ""
+            echo "## Your Task"
+            echo "Analyze ALL the merged PR changes from the past week and determine if the $DOC_FILE needs updates."
+            echo ""
+            echo "## ABSOLUTE REQUIREMENTS - VIOLATION WILL BE REJECTED:"
+            echo ""
+            echo "1. **PRESERVE PROJECT IDENTITY**:"
+            echo "   - The project name \"$PROJECT_TITLE\" MUST remain unchanged"
+            echo "   - Do NOT replace this with documentation for a different project"
+            echo "   - Maintain all existing project-specific information"
+            echo ""
+            echo "2. **ONLY ADD, NEVER REMOVE**:"
+            echo "   - You may ONLY add new information based on PR changes"
+            echo "   - NEVER remove existing sections, features, or content"
+            echo "   - NEVER replace existing content with unrelated information"
+            echo "   - Keep all existing headings, sections, and structure intact"
+            echo ""
+            echo "3. **STAY RELEVANT TO PR CHANGES**:"
+            echo "   - Only update sections directly related to the code changes in the PR diffs"
+            echo "   - If PRs add features, document those features"
+            echo "   - If PRs change behavior, update those specific behavior sections"
+            echo "   - Do NOT make unrelated changes"
+            echo ""
+            echo "4. **VERIFY PROJECT MATCH**:"
+            echo "   - Cross-reference the PR diffs with the current documentation"
+            echo "   - Ensure the technologies, frameworks, and tools mentioned in the PRs match those in the documentation"
+            echo "   - If there is a mismatch, output NO_UPDATES_NEEDED"
+            echo ""
+            echo "5. **OUTPUT FORMAT**:"
+            echo "   - Output ONLY the complete updated documentation content"
+            echo "   - NO preambles, acknowledgments, or explanatory text"
+            echo '   - NO phrases like "Here is the updated", "I have analyzed", etc.'
+            echo "   - Start directly with the documentation content"
+            echo ""
+            echo "6. **SIGNIFICANCE CHECK**:"
+            echo "   - UPDATE documentation for: new files/modules, new features, API changes, new dependencies, configuration changes, new functionality, data structures, workflow changes"
+            echo "   - ALSO consider: multiple small changes that collectively add up to meaningful updates"
+            echo "   - Skip ONLY: isolated typos, minor code comments, whitespace formatting"
+            echo "   - When in doubt, UPDATE - it is better to document changes than miss them"
+            echo "   - Consider the COMBINED impact of all PRs from the week"
+            echo ""
+            echo "## Decision Process:"
+            echo ""
+            echo "1. Verify these PRs are for the project \"$PROJECT_TITLE\" in repository \"$REPO_NAME\""
+            echo "2. Carefully analyze what changed across ALL merged PRs in the diffs"
+            echo "3. Check if ANY new files, modules, functions, or features were added"
+            echo "4. Look for changes to existing functionality that users should know about"
+            echo "5. If ANY of the above exist: Add new information to relevant sections WITHOUT removing existing content"
+            echo '6. ONLY output "NO_UPDATES_NEEDED" if the changes are truly insignificant (like pure formatting)'
+            echo ""
+            echo "## Response:"
+            echo "- If significant, relevant updates are needed: Output the COMPLETE updated documentation (with additions only)"
+            echo "- If no updates needed OR project mismatch detected: Output exactly: NO_UPDATES_NEEDED"
+            echo ""
+            echo "Begin your response now:"
+          } > "$PROMPT_FILE"
 
           chmod 600 "$PROMPT_FILE"
-          FULL_PROMPT=$(cat "$PROMPT_FILE")
 
           # Call Claude API with secure header handling
           echo "  Calling Claude API for $DOC_FILE..." >> $GITHUB_STEP_SUMMARY
 
-          # Create secure request body file
+          # Create secure request body file using jq --rawfile for safe prompt handling
           REQUEST_FILE="$TEMP_DIR/request_$(openssl rand -hex 8).json"
           jq -n \
             --arg model "claude-sonnet-4-5" \
             --argjson max_tokens 16384 \
-            --arg content "$FULL_PROMPT" \
+            --rawfile content "$PROMPT_FILE" \
             '{
               model: $model,
               max_tokens: $max_tokens,
