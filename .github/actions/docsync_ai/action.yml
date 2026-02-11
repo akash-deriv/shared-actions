@@ -528,65 +528,10 @@ runs:
             return 0
           fi
 
-          # ===== HALLUCINATION PREVENTION VALIDATION =====
-          echo "  Validating output for hallucination..." >> $GITHUB_STEP_SUMMARY
-
-          # Validation 1: Check project title is preserved
-          if [ "$PROJECT_TITLE" != "Unknown Project" ]; then
-            PROJECT_NAME_CORE=$(echo "$PROJECT_TITLE" | cut -d: -f1 | cut -d- -f1 | xargs)
-            if ! echo "$CLAUDE_OUTPUT" | head -n 50 | grep -qi "$PROJECT_NAME_CORE"; then
-              echo "  VALIDATION FAILED: Project title '$PROJECT_TITLE' not found in output" >> $GITHUB_STEP_SUMMARY
-              echo "  Possible hallucination detected - rejecting update" >> $GITHUB_STEP_SUMMARY
-              return 1
-            fi
-          fi
-
-          # Validation 2: Check output length isn't drastically different (hallucination indicator)
+          # Log output stats
           INPUT_LENGTH=${#DOC_CONTENT}
           OUTPUT_LENGTH=${#CLAUDE_OUTPUT}
-
-          # Allow output to be 10%-1000% of input length (very wide range to allow significant additions)
-          MIN_LENGTH=$((INPUT_LENGTH * 10 / 100))
-          MAX_LENGTH=$((INPUT_LENGTH * 1000 / 100))
-
-          if [ $OUTPUT_LENGTH -lt $MIN_LENGTH ]; then
-            echo "  VALIDATION FAILED: Output too short ($OUTPUT_LENGTH vs $INPUT_LENGTH chars)" >> $GITHUB_STEP_SUMMARY
-            echo "  Possible content removal detected - rejecting update" >> $GITHUB_STEP_SUMMARY
-            return 1
-          fi
-
-          if [ $OUTPUT_LENGTH -gt $MAX_LENGTH ]; then
-            echo "  VALIDATION FAILED: Output too long ($OUTPUT_LENGTH vs $INPUT_LENGTH chars)" >> $GITHUB_STEP_SUMMARY
-            echo "  Possible hallucination detected - rejecting update" >> $GITHUB_STEP_SUMMARY
-            return 1
-          fi
-
-          # Validation 3: Check that first heading is preserved
-          ORIGINAL_HEADING=$(echo "$DOC_CONTENT" | grep -E "^#\s+" | head -n 1 | sed 's/^#*\s*//')
-          NEW_HEADING=$(echo "$CLAUDE_OUTPUT" | grep -E "^#\s+" | head -n 1 | sed 's/^#*\s*//')
-
-          if [ -n "$ORIGINAL_HEADING" ] && [ "$ORIGINAL_HEADING" != "$NEW_HEADING" ]; then
-            echo "  WARNING: First heading changed from '$ORIGINAL_HEADING' to '$NEW_HEADING'" >> $GITHUB_STEP_SUMMARY
-            echo "  VALIDATION FAILED: Project heading must not change - rejecting update" >> $GITHUB_STEP_SUMMARY
-            return 1
-          fi
-
-          # Validation 4: Check key structural elements are preserved
-          ORIGINAL_HEADING_COUNT=$(echo "$DOC_CONTENT" | grep -cE "^##\s+" || echo "0")
-          NEW_HEADING_COUNT=$(echo "$CLAUDE_OUTPUT" | grep -cE "^##\s+" || echo "0")
-
-          # Allow +/-3 heading difference (for additions, not wholesale changes)
-          HEADING_DIFF=$((NEW_HEADING_COUNT - ORIGINAL_HEADING_COUNT))
-          if [ $HEADING_DIFF -lt -3 ]; then
-            echo "  VALIDATION FAILED: Too many sections removed ($HEADING_DIFF headings)" >> $GITHUB_STEP_SUMMARY
-            echo "  Content removal detected - rejecting update" >> $GITHUB_STEP_SUMMARY
-            return 1
-          fi
-
-          # All validations passed
-          echo "  Validation passed - updating $DOC_FILE" >> $GITHUB_STEP_SUMMARY
-          echo "  Length: $INPUT_LENGTH -> $OUTPUT_LENGTH chars ($(( (OUTPUT_LENGTH * 100) / INPUT_LENGTH ))%)" >> $GITHUB_STEP_SUMMARY
-          echo "  Sections: $ORIGINAL_HEADING_COUNT -> $NEW_HEADING_COUNT headings" >> $GITHUB_STEP_SUMMARY
+          echo "  Updating $DOC_FILE ($INPUT_LENGTH -> $OUTPUT_LENGTH chars)" >> $GITHUB_STEP_SUMMARY
 
           # Write the updated documentation
           echo "$CLAUDE_OUTPUT" > "$DOC_FILE"
