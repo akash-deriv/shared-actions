@@ -1,5 +1,5 @@
 name: DocSync AI - Documentation Sync
-description: Automatically update documentation based on PR merges using Claude AI
+description: Automatically update documentation based on weekly merged PRs using Claude AI
 
 inputs:
   github_token:
@@ -11,16 +11,6 @@ inputs:
   repository:
     description: "Repository name (owner/repo)"
     required: true
-  pr_number:
-    description: "Merged PR number that triggered this workflow"
-    required: true
-  pr_title:
-    description: "Merged PR title"
-    required: true
-  pr_body:
-    description: "Merged PR body/description"
-    required: false
-    default: ""
   base_branch:
     description: "Base branch for documentation PR (e.g., master or main)"
     required: false
@@ -29,14 +19,6 @@ inputs:
     description: "Comma-separated labels for the documentation PR"
     required: false
     default: "documentation,automated"
-  is_aggregate_mode:
-    description: "Whether processing multiple PRs in aggregate mode"
-    required: false
-    default: "false"
-  aggregated_prs_json:
-    description: "JSON array of PR objects with metadata (for aggregate mode)"
-    required: false
-    default: "[]"
 
 outputs:
   doc_pr_created:
@@ -52,165 +34,129 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: 📥 Checkout Repository
+    - name: Checkout Repository
       uses: actions/checkout@v4
       with:
         token: ${{ inputs.github_token }}
         ref: ${{ inputs.base_branch }}
         fetch-depth: 0
 
-    - name: 🔍 Debug - Repository State
+    - name: Debug - Repository State
       shell: bash
       run: |
-        echo "## 🔍 Repository State" >> $GITHUB_STEP_SUMMARY
+        echo "## Repository State" >> $GITHUB_STEP_SUMMARY
         echo "Working directory: $(pwd)" >> $GITHUB_STEP_SUMMARY
         echo "Current branch: $(git branch --show-current)" >> $GITHUB_STEP_SUMMARY
         echo "Latest commit: $(git log -1 --oneline)" >> $GITHUB_STEP_SUMMARY
 
         # Check for existing documentation files (case-insensitive)
-        find . -maxdepth 1 -iname "readme.md" | while read f; do echo "✅ Found ${f#./}" >> $GITHUB_STEP_SUMMARY; done
-        find . -maxdepth 1 -iname "claude.md" | while read f; do echo "✅ Found ${f#./}" >> $GITHUB_STEP_SUMMARY; done
+        find . -maxdepth 1 -iname "readme.md" | while read f; do echo "Found ${f#./}" >> $GITHUB_STEP_SUMMARY; done
+        find . -maxdepth 1 -iname "claude.md" | while read f; do echo "Found ${f#./}" >> $GITHUB_STEP_SUMMARY; done
 
-    - name: 📋 Fetch PR Details and Diffs
+    - name: Fetch Weekly Merged PRs
       id: pr-details
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
-        PR_NUMBER: ${{ inputs.pr_number }}
         REPO_NAME: ${{ inputs.repository }}
-        IS_AGGREGATE: ${{ inputs.is_aggregate_mode }}
-        AGGREGATED_PRS: ${{ inputs.aggregated_prs_json }}
+        BASE_BRANCH: ${{ inputs.base_branch }}
       run: |
         set -e
+
+        # Validate repository format (owner/repo)
+        if ! [[ "$REPO_NAME" =~ ^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$ ]]; then
+          echo "Invalid repository format: $REPO_NAME" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+
+        if [ ${#REPO_NAME} -gt 100 ]; then
+          echo "Repository name too long" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+
+        echo "## Weekly Merged PRs" >> $GITHUB_STEP_SUMMARY
+        echo "Repository: $REPO_NAME" >> $GITHUB_STEP_SUMMARY
 
         # Create secure temporary directory
         TEMP_DIR=$(mktemp -d -t docsync-XXXXXXXXXX)
         echo "temp_dir=$TEMP_DIR" >> $GITHUB_OUTPUT
 
-        if [ "$IS_AGGREGATE" = "true" ]; then
-          # ===== AGGREGATE MODE: Process multiple PRs =====
-          echo "## 📋 Processing Multiple PRs (Aggregate Mode)" >> $GITHUB_STEP_SUMMARY
+        # Calculate date 7 days ago (compatible with Ubuntu/GNU date)
+        SINCE_DATE=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)
+        echo "Looking for PRs merged since: $SINCE_DATE" >> $GITHUB_STEP_SUMMARY
 
-          # Validate JSON
-          if ! echo "$AGGREGATED_PRS" | jq empty 2>/dev/null; then
-            echo "❌ Invalid aggregated PRs JSON" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
+        # Fetch all merged PRs to base branch in the last 7 days
+        # Use GitHub Search API to find merged PRs
+        MERGED_PRS=$(gh api \
+          -H "Accept: application/vnd.github+json" \
+          "/repos/$REPO_NAME/pulls?state=closed&base=$BASE_BRANCH&sort=updated&direction=desc&per_page=100" \
+          --jq "[.[] | select(.merged_at != null and .merged_at >= \"$SINCE_DATE\")]" 2>&1 || echo "[]")
 
-          PR_COUNT=$(echo "$AGGREGATED_PRS" | jq 'length')
-          echo "Processing $PR_COUNT PRs" >> $GITHUB_STEP_SUMMARY
+        # Validate response is valid JSON
+        if ! echo "$MERGED_PRS" | jq empty 2>/dev/null; then
+          echo "Invalid response from GitHub API" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
 
-          # Initialize aggregation variables
-          AGGREGATED_DIFF=""
-          AGGREGATED_FILES=""
+        # Filter out DocSync AI PRs and automated PRs
+        FILTERED_PRS=$(echo "$MERGED_PRS" | jq '[.[] | select(
+          (.title | test("DocSync AI"; "i") | not) and
+          ([.labels[].name] | any(. == "automated") | not)
+        )]')
 
-          # Process each PR
-          echo "$AGGREGATED_PRS" | jq -c '.[]' | while IFS= read -r pr; do
-            PR_NUM=$(echo "$pr" | jq -r '.number')
-            PR_TITLE=$(echo "$pr" | jq -r '.title')
+        PR_COUNT=$(echo "$FILTERED_PRS" | jq 'length')
+        echo "Found $PR_COUNT merged PR(s) in the last 7 days (excluding DocSync AI PRs)" >> $GITHUB_STEP_SUMMARY
 
-            echo "  Fetching PR #$PR_NUM: $PR_TITLE" >> $GITHUB_STEP_SUMMARY
+        if [ "$PR_COUNT" -eq 0 ]; then
+          echo "No merged PRs found in the last 7 days - skipping documentation update" >> $GITHUB_STEP_SUMMARY
+          echo "skip_analysis=true" >> $GITHUB_OUTPUT
+          exit 0
+        fi
 
-            # Get PR diff with size limit
-            MAX_DIFF_SIZE=1048576  # 1MB per PR
-            PR_DIFF=$(gh api \
-              -H "Accept: application/vnd.github.v3.diff" \
-              "/repos/$REPO_NAME/pulls/$PR_NUM" 2>&1 | head -c $MAX_DIFF_SIZE)
+        # Build PR summary and aggregate diffs
+        PR_SUMMARY=""
+        COMBINED_DIFF=""
+        ALL_CHANGED_FILES=""
+        MAX_DIFF_SIZE=1048576  # 1MB total budget for combined diffs
+        CURRENT_DIFF_SIZE=0
 
-            # Sanitize diff content
-            PR_DIFF=$(echo "$PR_DIFF" | tr -d '\000' | iconv -c -t UTF-8//IGNORE)
+        # Save PR list for later reference
+        echo "$FILTERED_PRS" | jq -r '.[].number' > "$TEMP_DIR/pr_numbers.txt"
+        chmod 600 "$TEMP_DIR/pr_numbers.txt"
 
-            # Filter out workflow files
-            PR_DIFF=$(echo "$PR_DIFF" | awk '
-              BEGIN { skip=0 }
-              /^diff --git.*\.github\/workflows\// { skip=1; next }
-              /^diff --git/ { skip=0 }
-              !skip { print }
-            ')
+        echo "### Merged PRs:" >> $GITHUB_STEP_SUMMARY
 
-            # Append to aggregate with separator
-            AGGREGATED_DIFF="$AGGREGATED_DIFF
-
-            --- PR #$PR_NUM: $PR_TITLE ---
-            $PR_DIFF
-            "
-
-            # Get changed files
-            FILES=$(gh api \
-              -H "Accept: application/vnd.github+json" \
-              "/repos/$REPO_NAME/pulls/$PR_NUM/files" \
-              --jq '.[].filename' 2>&1 | grep -v '^\.github/workflows/' || echo "")
-
-            AGGREGATED_FILES="$AGGREGATED_FILES
-            $FILES"
-          done
-
-          # Save aggregated diff
-          PR_DIFF_FILE="$TEMP_DIR/pr_diff.txt"
-          echo "$AGGREGATED_DIFF" > "$PR_DIFF_FILE"
-          chmod 600 "$PR_DIFF_FILE"
-
-          # Save changed files (unique)
-          echo "$AGGREGATED_FILES" | sort -u > "$TEMP_DIR/changed_files.txt"
-
-          CHANGED_FILES_FILTERED=$(cat "$TEMP_DIR/changed_files.txt")
-
-          # Check if we have any files to document
-          if [ -z "$CHANGED_FILES_FILTERED" ]; then
-            echo "⏭️ All changes are in .github/workflows - skipping documentation update" >> $GITHUB_STEP_SUMMARY
-            echo "skip_analysis=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "### Aggregated Changed Files:" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "$CHANGED_FILES_FILTERED" | head -n 50 >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-
-          echo "changed_files<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGED_FILES_FILTERED" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          echo "skip_analysis=false" >> $GITHUB_OUTPUT
-
-        else
-          # ===== SINGLE PR MODE: Original logic =====
+        while IFS= read -r PR_NUM; do
           # Validate PR number
-          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
-            echo "❌ Invalid PR number: $PR_NUMBER" >> $GITHUB_STEP_SUMMARY
-            exit 1
+          if ! [[ "$PR_NUM" =~ ^[0-9]+$ ]]; then
+            continue
           fi
 
-          if [ "$PR_NUMBER" -lt 1 ] || [ "$PR_NUMBER" -gt 999999 ]; then
-            echo "❌ PR number out of valid range: $PR_NUMBER" >> $GITHUB_STEP_SUMMARY
-            exit 1
+          # Get PR metadata
+          PR_TITLE=$(echo "$FILTERED_PRS" | jq -r ".[] | select(.number == $PR_NUM) | .title" | tr -d '\000-\037' | head -c 200)
+          PR_BODY_RAW=$(echo "$FILTERED_PRS" | jq -r ".[] | select(.number == $PR_NUM) | .body // \"\"" | tr -d '\000' | iconv -c -t UTF-8//IGNORE | head -c 5000)
+
+          echo "- PR #$PR_NUM: $PR_TITLE" >> $GITHUB_STEP_SUMMARY
+
+          PR_SUMMARY="${PR_SUMMARY}
+        - PR #${PR_NUM}: ${PR_TITLE}
+          Description: ${PR_BODY_RAW}"
+
+          # Get PR diff (respect size budget)
+          REMAINING_BUDGET=$((MAX_DIFF_SIZE - CURRENT_DIFF_SIZE))
+          if [ $REMAINING_BUDGET -le 0 ]; then
+            echo "  (diff skipped - size budget exceeded)" >> $GITHUB_STEP_SUMMARY
+            continue
           fi
 
-          # Validate repository format
-          if ! [[ "$REPO_NAME" =~ ^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$ ]]; then
-            echo "❌ Invalid repository format: $REPO_NAME" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-
-          if [ ${#REPO_NAME} -gt 100 ]; then
-            echo "❌ Repository name too long" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-
-          echo "## 📋 Merged PR Details" >> $GITHUB_STEP_SUMMARY
-          echo "Repository: $REPO_NAME" >> $GITHUB_STEP_SUMMARY
-          echo "PR #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
-
-          # Get PR diff with size limit
-          MAX_DIFF_SIZE=1048576  # 1MB
           PR_DIFF=$(gh api \
             -H "Accept: application/vnd.github.v3.diff" \
-            "/repos/$REPO_NAME/pulls/$PR_NUMBER" 2>&1 | head -c $MAX_DIFF_SIZE)
+            "/repos/$REPO_NAME/pulls/$PR_NUM" 2>&1 | head -c $REMAINING_BUDGET)
 
-          # Sanitize diff content
+          # Sanitize and validate diff content
           PR_DIFF=$(echo "$PR_DIFF" | tr -d '\000' | iconv -c -t UTF-8//IGNORE)
 
-          # Filter out workflow files
+          # Filter out .github/workflows diffs (don't include workflow changes in analysis)
           PR_DIFF=$(echo "$PR_DIFF" | awk '
             BEGIN { skip=0 }
             /^diff --git.*\.github\/workflows\// { skip=1; next }
@@ -218,69 +164,95 @@ runs:
             !skip { print }
           ')
 
-          # Save PR diff
-          PR_DIFF_FILE="$TEMP_DIR/pr_diff.txt"
-          echo "$PR_DIFF" > "$PR_DIFF_FILE"
-          chmod 600 "$PR_DIFF_FILE"
+          DIFF_SIZE=${#PR_DIFF}
+          CURRENT_DIFF_SIZE=$((CURRENT_DIFF_SIZE + DIFF_SIZE))
 
-          # Get changed files
+          COMBINED_DIFF="${COMBINED_DIFF}
+
+        === PR #${PR_NUM}: ${PR_TITLE} ===
+        ${PR_DIFF}"
+
+          # Get list of changed files for this PR
           CHANGED_FILES=$(gh api \
             -H "Accept: application/vnd.github+json" \
-            "/repos/$REPO_NAME/pulls/$PR_NUMBER/files" \
+            "/repos/$REPO_NAME/pulls/$PR_NUM/files" \
             --jq '.[].filename' 2>&1 || echo "")
 
-          # Filter out workflow files
+          # Filter out .github/workflows files
           CHANGED_FILES_FILTERED=$(echo "$CHANGED_FILES" | grep -v '^\.github/workflows/' || echo "")
+          ALL_CHANGED_FILES="${ALL_CHANGED_FILES}
+        ${CHANGED_FILES_FILTERED}"
 
-          # Check if all changes were in workflows
-          if [ -n "$CHANGED_FILES" ] && [ -z "$CHANGED_FILES_FILTERED" ]; then
-            echo "⏭️ All changes are in .github/workflows - skipping documentation update" >> $GITHUB_STEP_SUMMARY
+        done < "$TEMP_DIR/pr_numbers.txt"
+
+        # Validate inputs for suspicious patterns
+        if echo "$PR_SUMMARY" | grep -qE '\$\(|\`|;[[:space:]]*curl|;[[:space:]]*wget|eval|exec'; then
+          echo "Warning: Suspicious pattern detected in PR inputs" >> $GITHUB_STEP_SUMMARY
+          # Continue but log the warning
+        fi
+
+        # Deduplicate changed files
+        ALL_CHANGED_FILES=$(echo "$ALL_CHANGED_FILES" | sort -u | grep -v '^$' || echo "")
+
+        # Check if all changes were in workflows only
+        if [ -z "$ALL_CHANGED_FILES" ] && [ -n "$COMBINED_DIFF" ]; then
+          # All filtered PRs only had workflow changes
+          NON_WORKFLOW_DIFF=$(echo "$COMBINED_DIFF" | grep -v '=== PR #' | grep -v '^$' || echo "")
+          if [ -z "$NON_WORKFLOW_DIFF" ]; then
+            echo "All changes are in .github/workflows - skipping documentation update" >> $GITHUB_STEP_SUMMARY
             echo "skip_analysis=true" >> $GITHUB_OUTPUT
             exit 0
           fi
-
-          # Display changed files
-          CHANGED_FILES_SUMMARY=$(echo "$CHANGED_FILES_FILTERED" | head -n 50)
-
-          echo "### Changed Files (excluding workflows):" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "$CHANGED_FILES_SUMMARY" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-
-          echo "changed_files<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGED_FILES_FILTERED" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          echo "skip_analysis=false" >> $GITHUB_OUTPUT
         fi
 
-    - name: 🤖 Run Claude Sonnet 4.5 Documentation Analysis
+        # Save combined diff to secure temp file
+        echo "$COMBINED_DIFF" > "$TEMP_DIR/pr_diff.txt"
+        chmod 600 "$TEMP_DIR/pr_diff.txt"
+
+        # Save PR summary to secure temp file
+        echo "$PR_SUMMARY" > "$TEMP_DIR/pr_summary.txt"
+        chmod 600 "$TEMP_DIR/pr_summary.txt"
+
+        # Save PR count for later
+        echo "pr_count=$PR_COUNT" >> $GITHUB_OUTPUT
+
+        # Sanitize changed files list (truncate for summary)
+        CHANGED_FILES_SUMMARY=$(echo "$ALL_CHANGED_FILES" | head -n 50)
+
+        echo "### Changed Files (excluding workflows):" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo "$CHANGED_FILES_SUMMARY" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+
+        echo "changed_files<<EOF" >> $GITHUB_OUTPUT
+        echo "$ALL_CHANGED_FILES" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: Run Claude Sonnet 4.5 Documentation Analysis
       id: claude-analysis
       if: steps.pr-details.outputs.skip_analysis != 'true'
       shell: bash
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
         REPO_NAME: ${{ inputs.repository }}
-        PR_NUMBER: ${{ inputs.pr_number }}
-        PR_TITLE: ${{ inputs.pr_title }}
-        PR_BODY: ${{ inputs.pr_body }}
         BASE_BRANCH: ${{ inputs.base_branch }}
         TEMP_DIR: ${{ steps.pr-details.outputs.temp_dir }}
+        PR_COUNT: ${{ steps.pr-details.outputs.pr_count }}
       run: |
         set -e
 
-        echo "## 🤖 Claude Sonnet 4.5 Analysis" >> $GITHUB_STEP_SUMMARY
+        echo "## Claude Sonnet 4.5 Analysis" >> $GITHUB_STEP_SUMMARY
         echo "Model: claude-sonnet-4-5-latest" >> $GITHUB_STEP_SUMMARY
+        echo "Analyzing $PR_COUNT merged PR(s) from the past week" >> $GITHUB_STEP_SUMMARY
 
-        # Sanitize user inputs (remove null bytes, control characters, limit size)
-        PR_TITLE_CLEAN=$(echo "$PR_TITLE" | tr -d '\000-\037' | head -c 1000)
-        PR_BODY_CLEAN=$(echo "$PR_BODY" | tr -d '\000' | iconv -c -t UTF-8//IGNORE | head -c 10000)
-
-        # Validate inputs for suspicious patterns
-        if echo "$PR_TITLE_CLEAN$PR_BODY_CLEAN" | grep -qE '\$\(|\`|;[[:space:]]*curl|;[[:space:]]*wget|eval|exec'; then
-          echo "⚠️ Warning: Suspicious pattern detected in PR inputs" >> $GITHUB_STEP_SUMMARY
-          # Continue but log the warning
+        # Read PR summary from secure temp file
+        PR_SUMMARY=""
+        if [ -f "$TEMP_DIR/pr_summary.txt" ]; then
+          PR_SUMMARY=$(cat "$TEMP_DIR/pr_summary.txt")
         fi
+
+        # Sanitize PR summary
+        PR_SUMMARY_CLEAN=$(echo "$PR_SUMMARY" | tr -d '\000' | iconv -c -t UTF-8//IGNORE | head -c 50000)
 
         # === PHASE 1: DETECT ALL DOCUMENTATION FILES ===
         # Check for BOTH files before updating anything
@@ -315,7 +287,7 @@ runs:
           if validate_doc_file "$README_FILE"; then
             HAS_README=true
           else
-            echo "⚠️ Invalid README file detected, skipping" >> $GITHUB_STEP_SUMMARY
+            echo "Invalid README file detected, skipping" >> $GITHUB_STEP_SUMMARY
             README_FILE=""
           fi
         fi
@@ -327,24 +299,24 @@ runs:
           if validate_doc_file "$CLAUDE_FILE"; then
             HAS_CLAUDE=true
           else
-            echo "⚠️ Invalid CLAUDE file detected, skipping" >> $GITHUB_STEP_SUMMARY
+            echo "Invalid CLAUDE file detected, skipping" >> $GITHUB_STEP_SUMMARY
             CLAUDE_FILE=""
           fi
         fi
 
         # Log detection results for both files
-        echo "### 📄 Documentation File Detection:" >> $GITHUB_STEP_SUMMARY
-        echo "- README.md: $([ "$HAS_README" = true ] && echo "✅ Found ($README_FILE)" || echo '❌ Not found')" >> $GITHUB_STEP_SUMMARY
-        echo "- CLAUDE.md: $([ "$HAS_CLAUDE" = true ] && echo "✅ Found ($CLAUDE_FILE)" || echo '❌ Not found')" >> $GITHUB_STEP_SUMMARY
+        echo "### Documentation File Detection:" >> $GITHUB_STEP_SUMMARY
+        echo "- README.md: $([ "$HAS_README" = true ] && echo "Found ($README_FILE)" || echo 'Not found')" >> $GITHUB_STEP_SUMMARY
+        echo "- CLAUDE.md: $([ "$HAS_CLAUDE" = true ] && echo "Found ($CLAUDE_FILE)" || echo 'Not found')" >> $GITHUB_STEP_SUMMARY
 
         if [ "$HAS_README" = false ] && [ "$HAS_CLAUDE" = false ]; then
-          echo "❌ No documentation file found (README.md or CLAUDE.md)" >> $GITHUB_STEP_SUMMARY
+          echo "No documentation file found (README.md or CLAUDE.md)" >> $GITHUB_STEP_SUMMARY
           echo "skip_analysis=true" >> $GITHUB_OUTPUT
           rm -rf "$TEMP_DIR"
           exit 0
         fi
 
-        # Read PR diff from secure temp file
+        # Read combined PR diff from secure temp file
         PR_DIFF_FILE="$TEMP_DIR/pr_diff.txt"
         if [ -f "$PR_DIFF_FILE" ]; then
           PR_DIFF=$(cat "$PR_DIFF_FILE")
@@ -356,7 +328,7 @@ runs:
         DIFF_SIZE=${#PR_DIFF}
         MAX_DIFF_SIZE=1048576  # 1MB
         if [ $DIFF_SIZE -gt $MAX_DIFF_SIZE ]; then
-          echo "⚠️ PR diff too large, truncating..." >> $GITHUB_STEP_SUMMARY
+          echo "Combined PR diff too large, truncating..." >> $GITHUB_STEP_SUMMARY
           PR_DIFF="${PR_DIFF:0:$MAX_DIFF_SIZE}"
         fi
 
@@ -385,7 +357,7 @@ runs:
 
           # Validate doc file path
           if ! validate_doc_file "$DOC_FILE"; then
-            echo "  ❌ Invalid doc file: $DOC_FILE" >> $GITHUB_STEP_SUMMARY
+            echo "  Invalid doc file: $DOC_FILE" >> $GITHUB_STEP_SUMMARY
             return 1
           fi
 
@@ -401,13 +373,13 @@ runs:
           # Extract key terms from existing documentation for validation
           KEY_TERMS=$(echo "$DOC_CONTENT" | head -n 100 | grep -oE '\b[A-Z][A-Za-z0-9]{3,}\b' | sort -u | head -n 20 | tr '\n' ',' | sed 's/,$//')
 
-          echo "  📌 Project: $PROJECT_TITLE" >> $GITHUB_STEP_SUMMARY
+          echo "  Project: $PROJECT_TITLE" >> $GITHUB_STEP_SUMMARY
 
           # Validate content size
           CONTENT_SIZE=${#DOC_CONTENT}
           MAX_CONTENT_SIZE=524288  # 512KB
           if [ $CONTENT_SIZE -gt $MAX_CONTENT_SIZE ]; then
-            echo "  ⚠️ Doc file too large: $CONTENT_SIZE bytes" >> $GITHUB_STEP_SUMMARY
+            echo "  Doc file too large: $CONTENT_SIZE bytes" >> $GITHUB_STEP_SUMMARY
             return 1
           fi
 
@@ -422,32 +394,8 @@ runs:
           PROMPT_FILE="$TEMP_DIR/claude_prompt_$(openssl rand -hex 8).txt"
 
           # Build prompt with safe variable substitution
-          # Build context header based on mode
-          if [ "$IS_AGGREGATE" = "true" ]; then
-            # Aggregate mode prompt
-            CONTEXT_HEADER="## Context
-            This is a WEEKLY AGGREGATION analyzing multiple merged PRs together.
-
-            ### Merged PRs ($(echo "$AGGREGATED_PRS" | jq 'length') total):"
-
-            while IFS= read -r line; do
-              CONTEXT_HEADER="$CONTEXT_HEADER
-              $line"
-            done < <(echo "$AGGREGATED_PRS" | jq -r '.[] | "- PR #\(.number): \(.title) (by @\(.author))"')
-
-            CONTEXT_HEADER="$CONTEXT_HEADER
-
-            Repository: '"$REPO_NAME"'"
-          else
-            # Single PR mode prompt
-            CONTEXT_HEADER="## Context
-            PR #'"$PR_NUMBER"': '"$PR_TITLE_CLEAN"'
-            PR Description: '"$PR_BODY_CLEAN"'
-            Repository: '"$REPO_NAME"'"
-          fi
-
           cat > "$PROMPT_FILE" << 'EOF'
-        You are a technical documentation expert tasked with updating documentation based on recent code changes.
+        You are a technical documentation expert tasked with updating documentation based on recent code changes from the past week.
 
         ## IMPORTANT: PROJECT IDENTITY
         This documentation is for: '"$PROJECT_TITLE"'
@@ -455,18 +403,16 @@ runs:
 
         **CRITICAL**: You MUST maintain the project identity. This is NOT a different project. Do NOT replace this documentation with content about any other project, library, or tool.
 
-        EOF
-
-          echo "$CONTEXT_HEADER" >> "$PROMPT_FILE"
-
-          cat >> "$PROMPT_FILE" << 'EOF'
+        ## Context - Weekly PR Summary
+        The following PRs were merged to '"$BASE_BRANCH"' in the past week:
+        '"$PR_SUMMARY_CLEAN"'
 
         ## Current Documentation Content:
         ```
         '"$DOC_CONTENT"'
         ```
 
-        ## PR Changes (Code Diff):
+        ## Combined PR Changes (Code Diffs from the past week):
         ```diff
         '"$PR_DIFF"'
         ```
@@ -483,7 +429,7 @@ runs:
         '"$OTHER_FILES_NOTE"'
 
         ## Your Task
-        Analyze the PR changes and determine if the '"$DOC_FILE"' needs updates.
+        Analyze ALL the merged PR changes from the past week and determine if the '"$DOC_FILE"' needs updates.
 
         ## ABSOLUTE REQUIREMENTS - VIOLATION WILL BE REJECTED:
 
@@ -499,14 +445,14 @@ runs:
            - Keep all existing headings, sections, and structure intact
 
         3. **STAY RELEVANT TO PR CHANGES**:
-           - Only update sections directly related to the code changes in the PR diff
-           - If the PR adds a feature, document that feature
-           - If the PR changes behavior, update that specific behavior section
+           - Only update sections directly related to the code changes in the PR diffs
+           - If PRs add features, document those features
+           - If PRs change behavior, update those specific behavior sections
            - Do NOT make unrelated changes
 
         4. **VERIFY PROJECT MATCH**:
-           - Cross-reference the PR diff with the current documentation
-           - Ensure the technologies, frameworks, and tools mentioned in the PR match those in the documentation
+           - Cross-reference the PR diffs with the current documentation
+           - Ensure the technologies, frameworks, and tools mentioned in the PRs match those in the documentation
            - If there's a mismatch, output NO_UPDATES_NEEDED
 
         5. **OUTPUT FORMAT**:
@@ -518,12 +464,13 @@ runs:
         6. **SIGNIFICANCE CHECK**:
            - Only update for significant changes: new features, major fixes, API changes, new dependencies, workflow changes
            - Skip minor changes: typos, code formatting, small refactors, comment updates
+           - Consider the COMBINED impact of all PRs from the week
 
         ## Decision Process:
 
-        1. Verify this PR is for the project "'"$PROJECT_TITLE"'" in repository "'"$REPO_NAME"'"
-        2. Analyze what changed in the PR diff
-        3. Determine if those changes require documentation updates
+        1. Verify these PRs are for the project "'"$PROJECT_TITLE"'" in repository "'"$REPO_NAME"'"
+        2. Analyze what changed across ALL merged PRs
+        3. Determine if those combined changes require documentation updates
         4. If yes: Add new information to relevant sections WITHOUT removing existing content
         5. If no: Output exactly "NO_UPDATES_NEEDED"
 
@@ -569,7 +516,7 @@ runs:
 
           # Validate response is valid JSON
           if ! echo "$RESPONSE" | jq empty 2>/dev/null; then
-            echo "  ❌ Invalid JSON response from API" >> $GITHUB_STEP_SUMMARY
+            echo "  Invalid JSON response from API" >> $GITHUB_STEP_SUMMARY
             return 1
           fi
 
@@ -577,13 +524,13 @@ runs:
           if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
             ERROR_TYPE=$(echo "$RESPONSE" | jq -r '.error.type // "unknown"')
             ERROR_CODE=$(echo "$RESPONSE" | jq -r '.error.code // "unknown"')
-            echo "  ❌ Claude API Error for $DOC_FILE: type=$ERROR_TYPE, code=$ERROR_CODE" >> $GITHUB_STEP_SUMMARY
+            echo "  Claude API Error for $DOC_FILE: type=$ERROR_TYPE, code=$ERROR_CODE" >> $GITHUB_STEP_SUMMARY
             return 1
           fi
 
           # Validate response structure
           if ! echo "$RESPONSE" | jq -e '.content[0].text' > /dev/null 2>&1; then
-            echo "  ❌ API response missing expected content field" >> $GITHUB_STEP_SUMMARY
+            echo "  API response missing expected content field" >> $GITHUB_STEP_SUMMARY
             return 1
           fi
 
@@ -594,7 +541,7 @@ runs:
           OUTPUT_SIZE=${#CLAUDE_OUTPUT}
           MAX_OUTPUT_SIZE=524288  # 512KB
           if [ $OUTPUT_SIZE -gt $MAX_OUTPUT_SIZE ]; then
-            echo "  ❌ Claude output too large: $OUTPUT_SIZE bytes" >> $GITHUB_STEP_SUMMARY
+            echo "  Claude output too large: $OUTPUT_SIZE bytes" >> $GITHUB_STEP_SUMMARY
             return 1
           fi
 
@@ -603,19 +550,19 @@ runs:
 
           # Check if updates are needed
           if echo "$CLAUDE_OUTPUT" | grep -q "NO_UPDATES_NEEDED"; then
-            echo "  ℹ️ No updates needed for $DOC_FILE" >> $GITHUB_STEP_SUMMARY
+            echo "  No updates needed for $DOC_FILE" >> $GITHUB_STEP_SUMMARY
             return 0
           fi
 
           # ===== HALLUCINATION PREVENTION VALIDATION =====
-          echo "  🔍 Validating output for hallucination..." >> $GITHUB_STEP_SUMMARY
+          echo "  Validating output for hallucination..." >> $GITHUB_STEP_SUMMARY
 
           # Validation 1: Check project title is preserved
           if [ "$PROJECT_TITLE" != "Unknown Project" ]; then
             PROJECT_NAME_CORE=$(echo "$PROJECT_TITLE" | cut -d: -f1 | cut -d- -f1 | xargs)
             if ! echo "$CLAUDE_OUTPUT" | head -n 50 | grep -qi "$PROJECT_NAME_CORE"; then
-              echo "  ❌ VALIDATION FAILED: Project title '$PROJECT_TITLE' not found in output" >> $GITHUB_STEP_SUMMARY
-              echo "  ⚠️ Possible hallucination detected - rejecting update" >> $GITHUB_STEP_SUMMARY
+              echo "  VALIDATION FAILED: Project title '$PROJECT_TITLE' not found in output" >> $GITHUB_STEP_SUMMARY
+              echo "  Possible hallucination detected - rejecting update" >> $GITHUB_STEP_SUMMARY
               return 1
             fi
           fi
@@ -629,14 +576,14 @@ runs:
           MAX_LENGTH=$((INPUT_LENGTH * 200 / 100))
 
           if [ $OUTPUT_LENGTH -lt $MIN_LENGTH ]; then
-            echo "  ❌ VALIDATION FAILED: Output too short ($OUTPUT_LENGTH vs $INPUT_LENGTH chars)" >> $GITHUB_STEP_SUMMARY
-            echo "  ⚠️ Possible content removal detected - rejecting update" >> $GITHUB_STEP_SUMMARY
+            echo "  VALIDATION FAILED: Output too short ($OUTPUT_LENGTH vs $INPUT_LENGTH chars)" >> $GITHUB_STEP_SUMMARY
+            echo "  Possible content removal detected - rejecting update" >> $GITHUB_STEP_SUMMARY
             return 1
           fi
 
           if [ $OUTPUT_LENGTH -gt $MAX_LENGTH ]; then
-            echo "  ❌ VALIDATION FAILED: Output too long ($OUTPUT_LENGTH vs $INPUT_LENGTH chars)" >> $GITHUB_STEP_SUMMARY
-            echo "  ⚠️ Possible hallucination detected - rejecting update" >> $GITHUB_STEP_SUMMARY
+            echo "  VALIDATION FAILED: Output too long ($OUTPUT_LENGTH vs $INPUT_LENGTH chars)" >> $GITHUB_STEP_SUMMARY
+            echo "  Possible hallucination detected - rejecting update" >> $GITHUB_STEP_SUMMARY
             return 1
           fi
 
@@ -645,8 +592,8 @@ runs:
           NEW_HEADING=$(echo "$CLAUDE_OUTPUT" | grep -E "^#\s+" | head -n 1 | sed 's/^#*\s*//')
 
           if [ -n "$ORIGINAL_HEADING" ] && [ "$ORIGINAL_HEADING" != "$NEW_HEADING" ]; then
-            echo "  ⚠️ WARNING: First heading changed from '$ORIGINAL_HEADING' to '$NEW_HEADING'" >> $GITHUB_STEP_SUMMARY
-            echo "  ❌ VALIDATION FAILED: Project heading must not change - rejecting update" >> $GITHUB_STEP_SUMMARY
+            echo "  WARNING: First heading changed from '$ORIGINAL_HEADING' to '$NEW_HEADING'" >> $GITHUB_STEP_SUMMARY
+            echo "  VALIDATION FAILED: Project heading must not change - rejecting update" >> $GITHUB_STEP_SUMMARY
             return 1
           fi
 
@@ -654,18 +601,18 @@ runs:
           ORIGINAL_HEADING_COUNT=$(echo "$DOC_CONTENT" | grep -cE "^##\s+" || echo "0")
           NEW_HEADING_COUNT=$(echo "$CLAUDE_OUTPUT" | grep -cE "^##\s+" || echo "0")
 
-          # Allow ±3 heading difference (for additions, not wholesale changes)
+          # Allow +/-3 heading difference (for additions, not wholesale changes)
           HEADING_DIFF=$((NEW_HEADING_COUNT - ORIGINAL_HEADING_COUNT))
           if [ $HEADING_DIFF -lt -3 ]; then
-            echo "  ❌ VALIDATION FAILED: Too many sections removed ($HEADING_DIFF headings)" >> $GITHUB_STEP_SUMMARY
-            echo "  ⚠️ Content removal detected - rejecting update" >> $GITHUB_STEP_SUMMARY
+            echo "  VALIDATION FAILED: Too many sections removed ($HEADING_DIFF headings)" >> $GITHUB_STEP_SUMMARY
+            echo "  Content removal detected - rejecting update" >> $GITHUB_STEP_SUMMARY
             return 1
           fi
 
           # All validations passed
-          echo "  ✅ Validation passed - updating $DOC_FILE" >> $GITHUB_STEP_SUMMARY
-          echo "  📊 Length: $INPUT_LENGTH → $OUTPUT_LENGTH chars ($(( (OUTPUT_LENGTH * 100) / INPUT_LENGTH ))%)" >> $GITHUB_STEP_SUMMARY
-          echo "  📊 Sections: $ORIGINAL_HEADING_COUNT → $NEW_HEADING_COUNT headings" >> $GITHUB_STEP_SUMMARY
+          echo "  Validation passed - updating $DOC_FILE" >> $GITHUB_STEP_SUMMARY
+          echo "  Length: $INPUT_LENGTH -> $OUTPUT_LENGTH chars ($(( (OUTPUT_LENGTH * 100) / INPUT_LENGTH ))%)" >> $GITHUB_STEP_SUMMARY
+          echo "  Sections: $ORIGINAL_HEADING_COUNT -> $NEW_HEADING_COUNT headings" >> $GITHUB_STEP_SUMMARY
 
           # Write the updated documentation
           echo "$CLAUDE_OUTPUT" > "$DOC_FILE"
@@ -675,35 +622,35 @@ runs:
 
         # === PHASE 2: UPDATE ALL DETECTED DOCUMENTATION FILES ===
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📝 Updating Documentation Files:" >> $GITHUB_STEP_SUMMARY
+        echo "### Updating Documentation Files:" >> $GITHUB_STEP_SUMMARY
 
         if [ "$HAS_README" = true ] && [ "$HAS_CLAUDE" = true ]; then
-          echo "Both $README_FILE and $CLAUDE_FILE detected — updating both" >> $GITHUB_STEP_SUMMARY
-          update_doc_file "$README_FILE" "README" "$CLAUDE_FILE also exists in this repository and is being updated separately for AI/Claude Code context. Focus this $README_FILE update on user-facing documentation only." || echo "  ⚠️ Failed to update $README_FILE" >> $GITHUB_STEP_SUMMARY
-          update_doc_file "$CLAUDE_FILE" "CLAUDE" "$README_FILE also exists in this repository and is being updated separately for user-facing documentation. Focus this $CLAUDE_FILE update on AI/Claude Code technical context only." || echo "  ⚠️ Failed to update $CLAUDE_FILE" >> $GITHUB_STEP_SUMMARY
+          echo "Both $README_FILE and $CLAUDE_FILE detected - updating both" >> $GITHUB_STEP_SUMMARY
+          update_doc_file "$README_FILE" "README" "$CLAUDE_FILE also exists in this repository and is being updated separately for AI/Claude Code context. Focus this $README_FILE update on user-facing documentation only." || echo "  Failed to update $README_FILE" >> $GITHUB_STEP_SUMMARY
+          update_doc_file "$CLAUDE_FILE" "CLAUDE" "$README_FILE also exists in this repository and is being updated separately for user-facing documentation. Focus this $CLAUDE_FILE update on AI/Claude Code technical context only." || echo "  Failed to update $CLAUDE_FILE" >> $GITHUB_STEP_SUMMARY
         elif [ "$HAS_README" = true ]; then
-          echo "Only $README_FILE detected — updating $README_FILE" >> $GITHUB_STEP_SUMMARY
-          update_doc_file "$README_FILE" "README" "This is the only documentation file in the repository." || echo "  ⚠️ Failed to update $README_FILE" >> $GITHUB_STEP_SUMMARY
+          echo "Only $README_FILE detected - updating $README_FILE" >> $GITHUB_STEP_SUMMARY
+          update_doc_file "$README_FILE" "README" "This is the only documentation file in the repository." || echo "  Failed to update $README_FILE" >> $GITHUB_STEP_SUMMARY
         elif [ "$HAS_CLAUDE" = true ]; then
-          echo "Only $CLAUDE_FILE detected — updating $CLAUDE_FILE" >> $GITHUB_STEP_SUMMARY
-          update_doc_file "$CLAUDE_FILE" "CLAUDE" "This is the only documentation file in the repository." || echo "  ⚠️ Failed to update $CLAUDE_FILE" >> $GITHUB_STEP_SUMMARY
+          echo "Only $CLAUDE_FILE detected - updating $CLAUDE_FILE" >> $GITHUB_STEP_SUMMARY
+          update_doc_file "$CLAUDE_FILE" "CLAUDE" "This is the only documentation file in the repository." || echo "  Failed to update $CLAUDE_FILE" >> $GITHUB_STEP_SUMMARY
         fi
 
         # Set final output
         if [ "$ANY_UPDATES" = true ]; then
           echo "skip_analysis=false" >> $GITHUB_OUTPUT
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "📝 Documentation files have been updated" >> $GITHUB_STEP_SUMMARY
+          echo "Documentation files have been updated" >> $GITHUB_STEP_SUMMARY
         else
           echo "skip_analysis=true" >> $GITHUB_OUTPUT
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "✅ No documentation updates needed" >> $GITHUB_STEP_SUMMARY
+          echo "No documentation updates needed" >> $GITHUB_STEP_SUMMARY
         fi
 
         # Clean up temporary directory
         rm -rf "$TEMP_DIR"
 
-    - name: 🔍 Check for Documentation Changes
+    - name: Check for Documentation Changes
       id: check-changes
       if: steps.claude-analysis.outputs.skip_analysis != 'true'
       shell: bash
@@ -713,10 +660,10 @@ runs:
 
         if git diff --cached --quiet; then
           echo "has_changes=false" >> $GITHUB_OUTPUT
-          echo "✅ No documentation updates needed" >> $GITHUB_STEP_SUMMARY
+          echo "No documentation updates needed" >> $GITHUB_STEP_SUMMARY
         else
           echo "has_changes=true" >> $GITHUB_OUTPUT
-          echo "📝 Documentation updates detected" >> $GITHUB_STEP_SUMMARY
+          echo "Documentation updates detected" >> $GITHUB_STEP_SUMMARY
 
           # Show what changed
           echo "### Changed Files:" >> $GITHUB_STEP_SUMMARY
@@ -736,7 +683,7 @@ runs:
           done
 
           if [ -n "$INVALID_FILES" ]; then
-            echo "❌ ERROR: Non-documentation files were modified:$INVALID_FILES" >> $GITHUB_STEP_SUMMARY
+            echo "ERROR: Non-documentation files were modified:$INVALID_FILES" >> $GITHUB_STEP_SUMMARY
             echo "Only README.md and CLAUDE.md (any casing) should be updated." >> $GITHUB_STEP_SUMMARY
             git reset --hard
             echo "has_changes=false" >> $GITHUB_OUTPUT
@@ -744,7 +691,7 @@ runs:
           fi
         fi
 
-    - name: 🗑️ Close Existing DocSync PRs
+    - name: Close Existing DocSync PRs
       if: steps.check-changes.outputs.has_changes == 'true'
       shell: bash
       env:
@@ -764,15 +711,15 @@ runs:
           for pr in $EXISTING_PRS; do
             echo "  Closing PR #$pr..."
             gh pr close "$pr" \
-              --comment "🔄 Closing stale documentation PR. A fresh update will be created." \
+              --comment "Closing stale documentation PR. A fresh update will be created." \
               --delete-branch 2>/dev/null || echo "  Could not close PR #$pr"
           done
-          echo "🗑️ Closed $(echo "$EXISTING_PRS" | wc -w | tr -d ' ') existing PR(s)" >> $GITHUB_STEP_SUMMARY
+          echo "Closed $(echo "$EXISTING_PRS" | wc -w | tr -d ' ') existing PR(s)" >> $GITHUB_STEP_SUMMARY
         else
           echo "No existing DocSync AI PRs found"
         fi
 
-    - name: 🔀 Create Documentation PR
+    - name: Create Documentation PR
       id: create-doc-pr
       if: steps.check-changes.outputs.has_changes == 'true'
       shell: bash
@@ -780,8 +727,7 @@ runs:
         GH_TOKEN: ${{ inputs.github_token }}
         BASE_BRANCH: ${{ inputs.base_branch }}
         PR_LABELS: ${{ inputs.pr_labels }}
-        MERGED_PR_NUMBER: ${{ inputs.pr_number }}
-        MERGED_PR_TITLE: ${{ inputs.pr_title }}
+        TEMP_DIR: ${{ steps.pr-details.outputs.temp_dir }}
       run: |
         set -e
 
@@ -792,7 +738,7 @@ runs:
         # Verify configuration was set
         CONFIGURED_NAME=$(git config --local user.name)
         if [ "$CONFIGURED_NAME" != "github-actions[bot]" ]; then
-          echo "❌ Failed to set git user configuration" >> $GITHUB_STEP_SUMMARY
+          echo "Failed to set git user configuration" >> $GITHUB_STEP_SUMMARY
           exit 1
         fi
 
@@ -803,13 +749,13 @@ runs:
 
         # Validate branch name
         if ! [[ "$BRANCH" =~ ^[a-zA-Z0-9/_-]+$ ]]; then
-          echo "❌ Generated invalid branch name" >> $GITHUB_STEP_SUMMARY
+          echo "Generated invalid branch name" >> $GITHUB_STEP_SUMMARY
           exit 1
         fi
 
         # Check branch doesn't already exist
         if git rev-parse --verify "$BRANCH" 2>/dev/null; then
-          echo "⚠️ Branch $BRANCH already exists, using alternative" >> $GITHUB_STEP_SUMMARY
+          echo "Branch $BRANCH already exists, using alternative" >> $GITHUB_STEP_SUMMARY
           BRANCH="${BRANCH}-$(openssl rand -hex 4)"
         fi
 
@@ -818,14 +764,11 @@ runs:
         # Add only documentation files (case-insensitive match, type f only)
         find . -maxdepth 1 -type f \( -iname "readme.md" -o -iname "claude.md" \) -print0 | xargs -0 git add 2>/dev/null || true
 
-        # Sanitize PR title for commit message (remove control chars, limit size)
-        MERGED_PR_TITLE_CLEAN=$(echo "$MERGED_PR_TITLE" | tr -d '\000-\037' | head -c 200)
-
         # Create commit with safe message (using heredoc to avoid injection)
         git commit -m "$(cat <<'EOF'
-        📚 DocSync AI: Update documentation
+        DocSync AI: Update documentation
 
-        Automatically updated documentation based on merged PR changes.
+        Automatically updated documentation based on weekly merged PR changes.
 
         Generated by DocSync AI
         EOF
@@ -833,35 +776,39 @@ runs:
 
         git push origin "$BRANCH"
 
-        # Create PR with sanitized content
-        # Sanitize PR number for display
-        if ! [[ "$MERGED_PR_NUMBER" =~ ^[0-9]+$ ]]; then
-          echo "❌ Invalid PR number for display" >> $GITHUB_STEP_SUMMARY
-          exit 1
+        # Build source PRs list for PR body
+        SOURCE_PRS_LIST=""
+        if [ -f "$TEMP_DIR/pr_numbers.txt" ]; then
+          while IFS= read -r PR_NUM; do
+            if [[ "$PR_NUM" =~ ^[0-9]+$ ]]; then
+              SOURCE_PRS_LIST="${SOURCE_PRS_LIST}
+        - **PR**: #${PR_NUM}"
+            fi
+          done < "$TEMP_DIR/pr_numbers.txt"
         fi
 
         # Create PR body safely
-        PR_BODY="## 📚 Automated Documentation Update
+        PR_BODY="## Automated Documentation Update (Weekly)
 
-        This PR updates the documentation based on changes merged in a recent PR.
+        This PR updates the documentation based on all changes merged in the past week.
 
-        ### 🔄 Source PR
-        - **PR**: #$MERGED_PR_NUMBER
+        ### Source PRs
+        ${SOURCE_PRS_LIST}
 
-        ### 📝 Changes
+        ### Changes
         Documentation has been automatically updated to reflect the latest changes in the codebase.
 
-        ### ✅ Review Checklist
+        ### Review Checklist
         - [ ] Documentation accurately reflects the code changes
         - [ ] No unrelated sections were modified
         - [ ] Formatting and style are consistent
         - [ ] Examples and code snippets are up to date
 
         ---
-        🤖 *Automated by DocSync AI*"
+        *Automated by DocSync AI (Weekly Sync)*"
 
         PR_URL=$(gh pr create \
-          --title "📚 DocSync AI: Update Documentation" \
+          --title "DocSync AI: Update Documentation" \
           --body "$PR_BODY" \
           --base "$BASE_BRANCH" \
           --head "$BRANCH")
@@ -884,12 +831,12 @@ runs:
         echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
 
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🔀 Documentation PR Created: #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
+        echo "### Documentation PR Created: #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
         echo "$PR_URL" >> $GITHUB_STEP_SUMMARY
 
-    - name: ✅ No Updates Needed
+    - name: No Updates Needed
       if: steps.pr-details.outputs.skip_analysis == 'true' || steps.claude-analysis.outputs.skip_analysis == 'true' || steps.check-changes.outputs.has_changes == 'false'
       shell: bash
       run: |
         echo "pr_created=false" >> $GITHUB_OUTPUT
-        echo "✅ Documentation is up to date - no changes needed" >> $GITHUB_STEP_SUMMARY
+        echo "Documentation is up to date - no changes needed" >> $GITHUB_STEP_SUMMARY
