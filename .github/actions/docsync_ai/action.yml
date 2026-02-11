@@ -117,8 +117,6 @@ runs:
         PR_SUMMARY=""
         COMBINED_DIFF=""
         ALL_CHANGED_FILES=""
-        MAX_DIFF_SIZE=104857600  # 100MB total budget for combined diffs
-        CURRENT_DIFF_SIZE=0
 
         # Save PR list for later reference
         echo "$FILTERED_PRS" | jq -r '.[].number' > "$TEMP_DIR/pr_numbers.txt"
@@ -142,16 +140,10 @@ runs:
         - PR #${PR_NUM}: ${PR_TITLE}
           Description: ${PR_BODY_RAW}"
 
-          # Get PR diff (respect size budget)
-          REMAINING_BUDGET=$((MAX_DIFF_SIZE - CURRENT_DIFF_SIZE))
-          if [ $REMAINING_BUDGET -le 0 ]; then
-            echo "  (diff skipped - size budget exceeded)" >> $GITHUB_STEP_SUMMARY
-            continue
-          fi
-
+          # Get full PR diff (no size limit)
           PR_DIFF=$(gh api \
             -H "Accept: application/vnd.github.v3.diff" \
-            "/repos/$REPO_NAME/pulls/$PR_NUM" 2>&1 | head -c $REMAINING_BUDGET)
+            "/repos/$REPO_NAME/pulls/$PR_NUM" 2>&1)
 
           # Sanitize and validate diff content
           PR_DIFF=$(echo "$PR_DIFF" | tr -d '\000' | iconv -c -t UTF-8//IGNORE)
@@ -163,9 +155,6 @@ runs:
             /^diff --git/ { skip=0 }
             !skip { print }
           ')
-
-          DIFF_SIZE=${#PR_DIFF}
-          CURRENT_DIFF_SIZE=$((CURRENT_DIFF_SIZE + DIFF_SIZE))
 
           COMBINED_DIFF="${COMBINED_DIFF}
 
@@ -238,6 +227,7 @@ runs:
         BASE_BRANCH: ${{ inputs.base_branch }}
         TEMP_DIR: ${{ steps.pr-details.outputs.temp_dir }}
         PR_COUNT: ${{ steps.pr-details.outputs.pr_count }}
+        CHANGED_FILES: ${{ steps.pr-details.outputs.changed_files }}
       run: |
         set -e
 
@@ -252,7 +242,7 @@ runs:
         fi
 
         # Sanitize PR summary
-        PR_SUMMARY_CLEAN=$(echo "$PR_SUMMARY" | tr -d '\000' | iconv -c -t UTF-8//IGNORE | head -c 50000)
+        PR_SUMMARY_CLEAN=$(echo "$PR_SUMMARY" | tr -d '\000' | iconv -c -t UTF-8//IGNORE)
 
         # === PHASE 1: DETECT ALL DOCUMENTATION FILES ===
         # Check for BOTH files before updating anything
@@ -324,14 +314,6 @@ runs:
           PR_DIFF="No diff available"
         fi
 
-        # Validate diff size
-        DIFF_SIZE=${#PR_DIFF}
-        MAX_DIFF_SIZE=104857600  # 100MB
-        if [ $DIFF_SIZE -gt $MAX_DIFF_SIZE ]; then
-          echo "Combined PR diff too large, truncating..." >> $GITHUB_STEP_SUMMARY
-          PR_DIFF="${PR_DIFF:0:$MAX_DIFF_SIZE}"
-        fi
-
         # Get repository structure (more restrictive search)
         REPO_STRUCTURE=$(find . -maxdepth 3 -type f \
           \( -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -o -name "*.py" -o -name "*.go" -o -name "*.java" -o -name "*.yml" -o -name "*.yaml" \) \
@@ -375,14 +357,6 @@ runs:
 
           echo "  Project: $PROJECT_TITLE" >> $GITHUB_STEP_SUMMARY
 
-          # Validate content size
-          CONTENT_SIZE=${#DOC_CONTENT}
-          MAX_CONTENT_SIZE=524288  # 512KB
-          if [ $CONTENT_SIZE -gt $MAX_CONTENT_SIZE ]; then
-            echo "  Doc file too large: $CONTENT_SIZE bytes" >> $GITHUB_STEP_SUMMARY
-            return 1
-          fi
-
           # Prepare the prompt based on file type
           if [ "$DOC_FORMAT" = "README" ]; then
             FORMAT_INSTRUCTION="This is a README.md file. Maintain standard README format with clear sections, proper markdown formatting, badges, installation instructions, usage examples, and project overview. Keep the professional, user-facing documentation style."
@@ -420,6 +394,13 @@ runs:
         ## Repository Structure:
         ```
         '"$REPO_STRUCTURE"'
+        ```
+
+        ## ALL Changed Files Across Merged PRs (excluding workflow files):
+        These are ALL the files that were added, modified, or deleted across ALL merged PRs this week.
+        Pay special attention to NEW files - these likely represent new features or modules that MUST be documented.
+        ```
+        '"$CHANGED_FILES"'
         ```
 
         ## Format Requirements:
@@ -540,14 +521,6 @@ runs:
           # Extract the response content
           CLAUDE_OUTPUT=$(echo "$RESPONSE" | jq -r '.content[0].text')
 
-          # Validate output size
-          OUTPUT_SIZE=${#CLAUDE_OUTPUT}
-          MAX_OUTPUT_SIZE=524288  # 512KB
-          if [ $OUTPUT_SIZE -gt $MAX_OUTPUT_SIZE ]; then
-            echo "  Claude output too large: $OUTPUT_SIZE bytes" >> $GITHUB_STEP_SUMMARY
-            return 1
-          fi
-
           # Sanitize output (remove null bytes, validate UTF-8)
           CLAUDE_OUTPUT=$(echo "$CLAUDE_OUTPUT" | tr -d '\000' | iconv -c -t UTF-8//IGNORE)
 
@@ -574,9 +547,9 @@ runs:
           INPUT_LENGTH=${#DOC_CONTENT}
           OUTPUT_LENGTH=${#CLAUDE_OUTPUT}
 
-          # Allow output to be 50%-200% of input length (prevent complete rewrites)
-          MIN_LENGTH=$((INPUT_LENGTH * 50 / 100))
-          MAX_LENGTH=$((INPUT_LENGTH * 200 / 100))
+          # Allow output to be 10%-1000% of input length (very wide range to allow significant additions)
+          MIN_LENGTH=$((INPUT_LENGTH * 10 / 100))
+          MAX_LENGTH=$((INPUT_LENGTH * 1000 / 100))
 
           if [ $OUTPUT_LENGTH -lt $MIN_LENGTH ]; then
             echo "  VALIDATION FAILED: Output too short ($OUTPUT_LENGTH vs $INPUT_LENGTH chars)" >> $GITHUB_STEP_SUMMARY

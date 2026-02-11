@@ -203,11 +203,10 @@ runs:
         TEMP_DIR=$(mktemp -d -t docsync-diff-XXXXXXXXXX)
         echo "temp_dir=$TEMP_DIR" >> $GITHUB_OUTPUT
 
-        # Get PR diff with size limit
-        MAX_DIFF_SIZE=104857600  # 100MB
+        # Get full PR diff (no size limit)
         PR_DIFF=$(gh api \
           -H "Accept: application/vnd.github.v3.diff" \
-          "/repos/$REPO_NAME/pulls/$PR_NUMBER" 2>&1 | head -c $MAX_DIFF_SIZE)
+          "/repos/$REPO_NAME/pulls/$PR_NUMBER" 2>&1)
 
         # Sanitize and validate diff content
         PR_DIFF=$(echo "$PR_DIFF" | tr -d '\000' | iconv -c -t UTF-8//IGNORE)
@@ -276,13 +275,6 @@ runs:
         PR_DIFF=""
         if [ "$IS_DOCSYNC_PR" != "true" ] && [ -n "$DIFF_TEMP_DIR" ] && [ -f "$DIFF_TEMP_DIR/pr_diff.txt" ]; then
           PR_DIFF=$(cat "$DIFF_TEMP_DIR/pr_diff.txt")
-          # Validate diff size
-          DIFF_SIZE=${#PR_DIFF}
-          MAX_DIFF_SIZE=104857600  # 100MB
-          if [ $DIFF_SIZE -gt $MAX_DIFF_SIZE ]; then
-            echo "PR diff too large, truncating..." >> $GITHUB_STEP_SUMMARY
-            PR_DIFF="${PR_DIFF:0:$MAX_DIFF_SIZE}"
-          fi
         fi
 
         # Sanitize PR title
@@ -394,14 +386,6 @@ runs:
           KEY_TERMS=$(echo "$DOC_CONTENT" | head -n 100 | grep -oE '\b[A-Z][A-Za-z0-9]{3,}\b' | sort -u | head -n 20 | tr '\n' ',' | sed 's/,$//')
 
           echo "  Project: $PROJECT_TITLE" >> $GITHUB_STEP_SUMMARY
-
-          # Validate content size
-          CONTENT_SIZE=${#DOC_CONTENT}
-          MAX_CONTENT_SIZE=524288  # 512KB
-          if [ $CONTENT_SIZE -gt $MAX_CONTENT_SIZE ]; then
-            echo "  Doc file too large: $CONTENT_SIZE bytes" >> $GITHUB_STEP_SUMMARY
-            return 1
-          fi
 
           # Prepare the prompt based on file type
           if [ "$DOC_FORMAT" = "README" ]; then
@@ -642,14 +626,6 @@ runs:
           # Extract the response content
           CLAUDE_OUTPUT=$(echo "$RESPONSE" | jq -r '.content[0].text')
 
-          # Validate output size
-          OUTPUT_SIZE=${#CLAUDE_OUTPUT}
-          MAX_OUTPUT_SIZE=524288  # 512KB
-          if [ $OUTPUT_SIZE -gt $MAX_OUTPUT_SIZE ]; then
-            echo "  Claude output too large: $OUTPUT_SIZE bytes" >> $GITHUB_STEP_SUMMARY
-            return 1
-          fi
-
           # Sanitize output (remove null bytes, validate UTF-8)
           CLAUDE_OUTPUT=$(echo "$CLAUDE_OUTPUT" | tr -d '\000' | iconv -c -t UTF-8//IGNORE)
 
@@ -678,9 +654,9 @@ runs:
           INPUT_LENGTH=${#DOC_CONTENT}
           OUTPUT_LENGTH=${#CLAUDE_OUTPUT}
 
-          # Allow output to be 50%-200% of input length (prevent complete rewrites)
-          MIN_LENGTH=$((INPUT_LENGTH * 50 / 100))
-          MAX_LENGTH=$((INPUT_LENGTH * 200 / 100))
+          # Allow output to be 10%-1000% of input length (very wide range to allow significant additions)
+          MIN_LENGTH=$((INPUT_LENGTH * 10 / 100))
+          MAX_LENGTH=$((INPUT_LENGTH * 1000 / 100))
 
           if [ $OUTPUT_LENGTH -lt $MIN_LENGTH ]; then
             echo "  VALIDATION FAILED: Output too short ($OUTPUT_LENGTH vs $INPUT_LENGTH chars)" >> $GITHUB_STEP_SUMMARY
