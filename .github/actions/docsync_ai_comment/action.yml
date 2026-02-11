@@ -204,7 +204,7 @@ runs:
         echo "temp_dir=$TEMP_DIR" >> $GITHUB_OUTPUT
 
         # Get PR diff with size limit
-        MAX_DIFF_SIZE=1048576  # 1MB
+        MAX_DIFF_SIZE=104857600  # 100MB
         PR_DIFF=$(gh api \
           -H "Accept: application/vnd.github.v3.diff" \
           "/repos/$REPO_NAME/pulls/$PR_NUMBER" 2>&1 | head -c $MAX_DIFF_SIZE)
@@ -278,7 +278,7 @@ runs:
           PR_DIFF=$(cat "$DIFF_TEMP_DIR/pr_diff.txt")
           # Validate diff size
           DIFF_SIZE=${#PR_DIFF}
-          MAX_DIFF_SIZE=1048576  # 1MB
+          MAX_DIFF_SIZE=104857600  # 100MB
           if [ $DIFF_SIZE -gt $MAX_DIFF_SIZE ]; then
             echo "PR diff too large, truncating..." >> $GITHUB_STEP_SUMMARY
             PR_DIFF="${PR_DIFF:0:$MAX_DIFF_SIZE}"
@@ -563,17 +563,20 @@ runs:
            - Start directly with the documentation content
 
         6. **SIGNIFICANCE CHECK**:
-           - Only update for significant changes: new features, major fixes, API changes, new dependencies, workflow changes
-           - Skip minor changes: typos, code formatting, small refactors, comment updates
+           - UPDATE documentation for: new files/modules, new features, API changes, new dependencies, configuration changes, new functionality, data structures, workflow changes
+           - ALSO consider: multiple small changes that collectively add up to meaningful updates
+           - Skip ONLY: isolated typos, minor code comments, whitespace formatting
+           - When in doubt, UPDATE - it's better to document changes than miss them
 
         ## Decision Process:
 
         1. Verify this PR is for the project "'"$PROJECT_TITLE"'" in repository "'"$REPO_NAME"'"
-        2. Analyze what changed in the PR diff
-        3. Consider the user instruction for guidance
-        4. Determine if those changes require documentation updates
-        5. If yes: Add new information to relevant sections WITHOUT removing existing content
-        6. If no: Output exactly "NO_UPDATES_NEEDED"
+        2. Carefully analyze what changed in the PR diff
+        3. Check if ANY new files, modules, functions, or features were added
+        4. Look for changes to existing functionality that users should know about
+        5. Consider the user instruction for guidance on what to focus on
+        6. If ANY of the above exist: Add new information to relevant sections WITHOUT removing existing content
+        7. ONLY output "NO_UPDATES_NEEDED" if the changes are truly insignificant (like pure formatting)
 
         ## Response:
         - If significant, relevant updates are needed: Output the COMPLETE updated documentation (with additions only)
@@ -593,7 +596,7 @@ runs:
           REQUEST_FILE="$TEMP_DIR/request_$(openssl rand -hex 8).json"
           jq -n \
             --arg model "claude-sonnet-4-5" \
-            --argjson max_tokens 8192 \
+            --argjson max_tokens 16384 \
             --arg content "$FULL_PROMPT" \
             '{
               model: $model,
