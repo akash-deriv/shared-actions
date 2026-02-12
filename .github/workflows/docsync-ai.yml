@@ -18,6 +18,11 @@ on:
         required: false
         default: ''
         type: string
+      slack_mention_user_id:
+        description: 'Slack user ID to mention in notifications (e.g., U01234ABCDE)'
+        required: false
+        default: ''
+        type: string
       trigger_type:
         description: 'Trigger type: "scheduled" for weekly cron, "comment" for PR comment'
         required: false
@@ -88,7 +93,7 @@ jobs:
 
       - name: Run DocSync AI Action
         id: docsync
-        uses: deriv-com/shared-actions/.github/actions/docsync_ai@master
+        uses: akash-deriv/shared-actions/.github/actions/docsync_ai@master
         with:
           github_token: ${{ secrets.DOCSYNC_GITHUB_TOKEN }}
           anthropic_api_key: ${{ secrets.DOCSYNC_ANTHROPIC_API_KEY }}
@@ -101,6 +106,7 @@ jobs:
         env:
           DOC_PR_NUMBER: ${{ steps.docsync.outputs.doc_pr_number }}
           DOC_PR_URL: ${{ steps.docsync.outputs.doc_pr_url }}
+          SLACK_MENTION_USER: ${{ inputs.slack_mention_user_id }}
         run: |
           set -e
 
@@ -111,21 +117,28 @@ jobs:
           # Sanitize inputs
           DOC_PR_URL_CLEAN=$(echo "$DOC_PR_URL" | head -c 500)
 
+          # Build mention text if user ID is provided
+          MENTION_TEXT=""
+          if [ -n "$SLACK_MENTION_USER" ]; then
+            MENTION_TEXT="<@$SLACK_MENTION_USER> "
+          fi
+
           # Create Slack payload with text fallback (required by Slack API)
           SLACK_PAYLOAD=$(jq -n \
             --arg channel "$SLACK_CHANNEL" \
             --arg repo "${{ github.repository }}" \
             --arg doc_pr_url "$DOC_PR_URL_CLEAN" \
             --arg doc_pr_num "$DOC_PR_NUMBER" \
+            --arg mention "$MENTION_TEXT" \
             '{
               "channel": $channel,
-              "text": ("Weekly Documentation Update Ready - PR #" + $doc_pr_num + " in " + $repo),
+              "text": ($mention + "Weekly Documentation Update Ready - PR #" + $doc_pr_num + " in " + $repo),
               "blocks": [
                 {
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": (":book: *Weekly Documentation Update Ready*\n*<" + $doc_pr_url + "|PR #" + $doc_pr_num + ">* in `" + $repo + "`")
+                    "text": ($mention + ":book: *Weekly Documentation Update Ready*\n*<" + $doc_pr_url + "|PR #" + $doc_pr_num + ">* in `" + $repo + "`")
                   }
                 },
                 {
@@ -203,7 +216,7 @@ jobs:
 
       - name: Run DocSync AI Comment Action
         id: docsync-comment
-        uses: deriv-com/shared-actions/.github/actions/docsync_ai_comment@master
+        uses: akash-deriv/shared-actions/.github/actions/docsync_ai_comment@master
         with:
           github_token: ${{ secrets.DOCSYNC_GITHUB_TOKEN }}
           anthropic_api_key: ${{ secrets.DOCSYNC_ANTHROPIC_API_KEY }}
@@ -217,6 +230,7 @@ jobs:
         env:
           COMMENT_PR_NUMBER: ${{ inputs.comment_pr_number }}
           IS_DOCSYNC_PR: ${{ steps.docsync-comment.outputs.is_docsync_pr }}
+          SLACK_MENTION_USER: ${{ inputs.slack_mention_user_id }}
         run: |
           set -e
 
@@ -234,6 +248,12 @@ jobs:
             UPDATE_TYPE="Documentation updated from PR comment"
           fi
 
+          # Build mention text if user ID is provided
+          MENTION_TEXT=""
+          if [ -n "$SLACK_MENTION_USER" ]; then
+            MENTION_TEXT="<@$SLACK_MENTION_USER> "
+          fi
+
           # Create Slack payload with text fallback (required by Slack API)
           SLACK_PAYLOAD=$(jq -n \
             --arg channel "$SLACK_CHANNEL" \
@@ -241,15 +261,16 @@ jobs:
             --arg pr_url "$PR_URL" \
             --arg pr_num "$COMMENT_PR_NUMBER" \
             --arg update_type "$UPDATE_TYPE" \
+            --arg mention "$MENTION_TEXT" \
             '{
               "channel": $channel,
-              "text": ($update_type + " - PR #" + $pr_num + " in " + $repo),
+              "text": ($mention + $update_type + " - PR #" + $pr_num + " in " + $repo),
               "blocks": [
                 {
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": (":memo: *Documentation Updated via Comment*\n*<" + $pr_url + "|PR #" + $pr_num + ">* in `" + $repo + "`")
+                    "text": ($mention + ":memo: *Documentation Updated via Comment*\n*<" + $pr_url + "|PR #" + $pr_num + ">* in `" + $repo + "`")
                   }
                 },
                 {
