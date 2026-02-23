@@ -81,7 +81,7 @@ runs:
         # Log comment_detected event
         EVENTS_FILE="/tmp/docsync_events_${GITHUB_RUN_ID}.jsonl"
         COMMENT_DISPLAY=$(echo "$COMMENT_BODY_CLEAN" | head -c 500)
-        jq -n \
+        jq -cn \
           --arg run_id "$GITHUB_RUN_ID" \
           --arg pr_num "PR-${{ inputs.pr_number }}" \
           --arg comment_body "$COMMENT_DISPLAY" \
@@ -494,7 +494,7 @@ runs:
 
           # Log pr_analyzed event (workflow-only changes)
           EVENTS_FILE="/tmp/docsync_events_${GITHUB_RUN_ID}.jsonl"
-          jq -n \
+          jq -cn \
             --arg run_id "$GITHUB_RUN_ID" \
             --arg pr_num "PR-$PR_NUMBER" \
             '{
@@ -525,7 +525,7 @@ runs:
         EVENTS_FILE="/tmp/docsync_events_${GITHUB_RUN_ID}.jsonl"
         FILES_COUNT=$(echo "$CHANGED_FILES_FILTERED" | grep -v '^$' | wc -l | tr -d ' ')
         FILES_JSON=$(echo "$CHANGED_FILES_FILTERED" | head -n 50 | grep -v '^$' | jq -R '.' | jq -s '.' 2>/dev/null || echo '[]')
-        jq -n \
+        jq -cn \
           --arg run_id "$GITHUB_RUN_ID" \
           --arg pr_num "PR-$PR_NUMBER" \
           --argjson fc "$FILES_COUNT" \
@@ -576,7 +576,7 @@ runs:
         EVENTS_FILE="/tmp/docsync_events_${GITHUB_RUN_ID}.jsonl"
 
         # Log claude_analysis_started event
-        jq -n \
+        jq -cn \
           --arg run_id "$GITHUB_RUN_ID" \
           '{
             agent: "DocSync AI",
@@ -683,7 +683,7 @@ runs:
 
             # Build API request
             SREQUEST_FILE="$TEMP_DIR/srequest_${i}.json"
-            jq -n \
+            jq -cn \
               --arg model "claude-sonnet-4-5" \
               --argjson max_tokens 4096 \
               --rawfile content "$SPROMPT_FILE" \
@@ -820,7 +820,7 @@ runs:
           echo "skip_analysis=true" >> $GITHUB_OUTPUT
 
           # Log claude_analysis_completed (skipped — no doc files)
-          jq -n \
+          jq -cn \
             --arg run_id "$GITHUB_RUN_ID" \
             --argjson input_tok "$TOTAL_INPUT_TOKENS" \
             --argjson output_tok "$TOTAL_OUTPUT_TOKENS" \
@@ -1091,7 +1091,7 @@ runs:
           echo "  Calling Claude API for $DOC_FILE..." >> $GITHUB_STEP_SUMMARY
 
           REQUEST_FILE="$TEMP_DIR/request_$(openssl rand -hex 8).json"
-          jq -n \
+          jq -cn \
             --arg model "claude-sonnet-4-5" \
             --argjson max_tokens 16384 \
             --rawfile content "$PROMPT_FILE" \
@@ -1188,7 +1188,7 @@ runs:
         SKIP_BOOL=$([ "$ANY_UPDATES" = true ] && echo "false" || echo "true")
         REASON=$([ "$ANY_UPDATES" = true ] && echo "Updates generated" || echo "No documentation changes required")
         FILES_JSON="[$(echo "$UPDATED_FILES_LIST" | sed 's/,$//')]"
-        jq -n \
+        jq -cn \
           --arg run_id "$GITHUB_RUN_ID" \
           --argjson input_tok "$TOTAL_INPUT_TOKENS" \
           --argjson output_tok "$TOTAL_OUTPUT_TOKENS" \
@@ -1317,7 +1317,7 @@ runs:
           # Log changes_committed event
           EVENTS_FILE="/tmp/docsync_events_${GITHUB_RUN_ID}.jsonl"
           UPDATED_FILES_JSON=$(echo "$CHANGED_FILES_LIST" | grep -v '^$' | jq -R '.' | jq -s '.' 2>/dev/null || echo '[]')
-          jq -n \
+          jq -cn \
             --arg run_id "$GITHUB_RUN_ID" \
             --arg pr_num "PR-$PR_NUMBER" \
             --arg commit_hash "$COMMIT_HASH" \
@@ -1362,7 +1362,7 @@ runs:
           gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
 
           # Log confirmation_comment_posted event
-          jq -n \
+          jq -cn \
             --arg run_id "$GITHUB_RUN_ID" \
             --arg pr_num "PR-$PR_NUMBER" \
             --arg message "Documentation updated with your suggestion." \
